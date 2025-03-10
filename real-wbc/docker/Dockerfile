@@ -16,8 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake sudo
 
 ARG USERNAME=real
-ARG USER_UID
-ARG USER_GID
+ARG USER_UID=1000
+ARG USER_GID=1000
 
 
 # Add the new user (userid should be consistent to the one in the host machine)
@@ -89,6 +89,7 @@ RUN wget https://nvidia.box.com/shared/static/0h6tk4msrl9xz3evft9t0mpwwwkw7a32.w
 
 RUN /home/${USERNAME}/miniforge3/bin/pip install numpy
 
+# Install ROS2
 USER root
 RUN apt-get update && \
     apt-get install -y \
@@ -168,7 +169,6 @@ USER root
 RUN apt-get update && \
     apt-get install -y ros-humble-rosbag2-storage-mcap && \
     apt-get install -y libspnav-dev spacenavd
-
     
 
 USER ${USERNAME}
