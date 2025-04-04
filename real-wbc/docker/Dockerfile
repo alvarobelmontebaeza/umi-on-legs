@@ -81,7 +81,7 @@ RUN echo "export PATH=/home/${USERNAME}/.vscode-server/bin/default_version/bin/r
 # It does not have access to cuda kernels as the Jetpack version on Unitree jetson is usually lower than 6.0.
 # In our project, the whole-body controller only uses CPU and diffusion policy is run on a separate PC
 #   thus cuda compute is not required in our project
-RUN wget https://nvidia.box.com/shared/static/0h6tk4msrl9xz3evft9t0mpwwwkw7a32.whl -O torch-2.1.0-cp310-cp310-linux_aarch64.whl && \
+RUN wget wget https://developer.download.nvidia.com/compute/redist/jp/v60/pytorch/torch-2.1.0+nv23.06-cp310-cp310-linux_aarch64.whl -O torch-2.1.0-cp310-cp310-linux_aarch64.whl && \
     /home/${USERNAME}/miniforge3/bin/pip install torch-2.1.0-cp310-cp310-linux_aarch64.whl && \
     rm torch-2.1.0-cp310-cp310-linux_aarch64.whl
 # To get torch working on earlier Jetpack version, you can try python3.8 versions in https://forums.developer.nvidia.com/t/pytorch-for-jetson/72048
@@ -173,7 +173,12 @@ RUN apt-get update && \
 
 USER ${USERNAME}
 
-# Add supports for ARX5
-RUN /home/${USERNAME}/miniforge3/bin/mamba install -y spdlog
-RUN /home/${USERNAME}/miniforge3/bin/pip install https://github.com/cheng-chi/spnav/archive/c1c938ebe3cc542db4685e0d13850ff1abfdb943.tar.gz atomics
-RUN echo "export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/home/\${USERNAME}/arx5-sdk/lib/aarch64" >> /home/${USERNAME}/.zshrc
+# Add supports for Interbotix WidowX 250s robot arm
+# Ensure setuptools is at a specific version to avoid issues with the installation script
+RUN /home/${USERNAME}/miniforge3/bin/pip install setuptools==65.5.0
+RUN apt install curl -y
+RUN curl 'https://raw.githubusercontent.com/Interbotix/interbotix_ros_manipulators/main/interbotix_ros_xsarms/install/rpi4/xsarm_rpi4_install.sh' > xsarm_rpi4_install.sh
+RUN chmod +x xsarm_rpi4_install.sh
+RUN ./xsarm_rpi4_install.sh -d humble -y
+RUN echo "source /opt/ros/humble/setup.zsh" >> /home/${USERNAME}/.zshrc && \
+    echo "source /home/\${USERNAME}/interbotix_ws/install/setup.zsh" >> /home/${USERNAME}/.zshrc
