@@ -81,9 +81,8 @@ RUN echo "export PATH=/home/${USERNAME}/.vscode-server/bin/default_version/bin/r
 # It does not have access to cuda kernels as the Jetpack version on Unitree jetson is usually lower than 6.0.
 # In our project, the whole-body controller only uses CPU and diffusion policy is run on a separate PC
 #   thus cuda compute is not required in our project
-RUN wget wget https://developer.download.nvidia.com/compute/redist/jp/v60/pytorch/torch-2.1.0+nv23.06-cp310-cp310-linux_aarch64.whl -O torch-2.1.0-cp310-cp310-linux_aarch64.whl && \
-    /home/${USERNAME}/miniforge3/bin/pip install torch-2.1.0-cp310-cp310-linux_aarch64.whl && \
-    rm torch-2.1.0-cp310-cp310-linux_aarch64.whl
+RUN /home/${USERNAME}/miniforge3/bin/pip install torch \
+--extra-index-url https://developer.download.nvidia.com/compute/redist/jp/v51/pytorch/
 # To get torch working on earlier Jetpack version, you can try python3.8 versions in https://forums.developer.nvidia.com/t/pytorch-for-jetson/72048
 #   Only Python 3.8 is supported on versions earlier than Jetpack 6.0 
 
