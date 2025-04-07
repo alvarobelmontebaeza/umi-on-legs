@@ -138,8 +138,8 @@ RUN echo "source /opt/ros/humble/install/setup.zsh" >> /home/${USERNAME}/.zshrc 
     echo "export CYCLONEDDS_URI=/home/\${USERNAME}/unitree_ros2/cyclonedds_ws/src/cyclonedds.xml" >> /home/${USERNAME}/.zshrc && \
     sed -i "s/enp2s0/eth0/g" /home/${USERNAME}/unitree_ros2/cyclonedds_ws/src/cyclonedds.xml
 
-RUN /home/${USERNAME}/miniforge3/bin/pip install transforms3d hydra-core filterpy numba omegaconf gitpython zarr rich "git+https://github.com/facebookresearch/pytorch3d.git@stable" python-socketio eventlet
-RUN /home/${USERNAME}/miniforge3/bin/mamba install -y diffusers==0.11.1 matplotlib seaborn
+RUN /home/${USERNAME}/miniforge3/bin/pip install transforms3d hydra-core filterpy numba omegaconf gitpython zarr rich python-socketio eventlet
+RUN /home/${USERNAME}/miniforge3/bin/mamba install -y matplotlib seaborn
 
 
 USER root
