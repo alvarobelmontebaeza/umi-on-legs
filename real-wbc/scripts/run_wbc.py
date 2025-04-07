@@ -86,7 +86,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--fix_at_init_pose", action="store_true")
     parser.add_argument("--use_realtime_target", action="store_true")
-    parser.add_argument("--pose_estimator", type=str, default="iphone")
+    parser.add_argument("--pose_estimator", type=str, default="mocap")
     args = parser.parse_args()
     wbc_node = WBCNode(**vars(args))
     logging.info("Deploy node ready")
