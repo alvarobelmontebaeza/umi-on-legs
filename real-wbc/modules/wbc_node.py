@@ -85,7 +85,7 @@ class WBCNode(Node):
         init_pos_err_tolerance: float = 0.1,  # meters
         init_orn_err_tolerance: float = 0.5,  # radians
         logging_dir: str = "logs",
-        pose_estimator: str = "iphone",
+        pose_estimator: str = "mocap",
     ):
         super().__init__("deploy_node")  # type: ignore
         self.replay_speed = replay_speed
@@ -95,30 +95,6 @@ class WBCNode(Node):
         self.init_action = np.zeros(18)
         self.latest_tick = -1
         
-        self.umi_cup_action = np.array(
-            [
-                -0.6732,
-                1.4633,
-                1.0376,
-                0.8649,
-                1.6390,
-                1.2028,
-                0.1966,
-                3.2722,
-                -3.4770,
-                0.5734,
-                3.0701,
-                -3.2379,
-                0.2190,
-                6.0063,
-                0.4964,
-                2.2911,
-                -0.0708,
-                0.8192,
-            ]
-        )
-        self.init_action[:] = self.umi_cup_action[:]
-
         self.prev_action = self.init_action
 
         self.arm2base = affines.compose(
@@ -141,7 +117,7 @@ class WBCNode(Node):
             Z=np.ones(3),
         )
 
-        # init subcribers
+        # -- INITIALIZE SUBSCRIBERS --
         self.joy_stick_sub = self.create_subscription(
             WirelessController,
             "wirelesscontroller",
@@ -151,7 +127,8 @@ class WBCNode(Node):
         self.lowlevel_state_sub = self.create_subscription(
             LowState, "lowstate", self.lowlevel_state_cb, low_state_history_depth
         )  # "/lowcmd" or  "lf/lowstate" (low frequencies)
-
+        
+        # Pose estimator for quadruped
         self.pose_estimator = pose_estimator
         if pose_estimator == "iphone":
             logging.info("Using iphone as pose estimator")
@@ -176,6 +153,8 @@ class WBCNode(Node):
             raise ValueError(f"Invalid pose_estimator: {pose_estimator}")
         self.robot_pose = np.identity(4, dtype=np.float32)
         self.robot_pose_tick = -1
+
+        # Pose estimator for arm
         self.gripper_pose = np.identity(4, dtype=np.float32)
         self.gripper_pose_tick = -1
         self.gripper_pose_sub = self.create_subscription(
@@ -184,7 +163,8 @@ class WBCNode(Node):
             self.gripper_pose_cb,
             low_state_history_depth,
         )
-        # init publishers
+
+        # Initialize motor publisher
         self.motor_pub = self.create_publisher(
             LowCmd, "lowcmd", low_state_history_depth
         )
@@ -198,7 +178,8 @@ class WBCNode(Node):
         self.cmd_msg.motor_cmd = self.motor_cmd.copy()
         self.quadruped_kp = np.zeros(12)
         self.quadruped_kd = np.zeros(12)
-        # init policy
+
+        # Initialize policy info
         self.policy_kp: np.ndarray
         self.policy_kd: np.ndarray
         self.policy_freq: float
@@ -237,7 +218,7 @@ class WBCNode(Node):
         logging.info("Press L1 for emergent stop")
         self.key_is_pressed = False  # for key press event
 
-        # Set up Arm
+        #  ------- ARM SETUP --------
         self.arx5_joint_controller = arx5.Arx5JointController("X5", "can0")
 
         self.arx5_joint_controller.enable_background_send_recv()
@@ -279,6 +260,7 @@ class WBCNode(Node):
             EEFState, "go2_arx5/eef_state", 1
         )
 
+        
         if use_realtime_target:
             self.target_input_mode = "realtime"
         else:
@@ -316,6 +298,20 @@ class WBCNode(Node):
 
     # @profile
     def robot_pose_cb(self, msg):
+        """
+        Callback function to update the robot's pose based on incoming messages.
+
+        Args:
+            msg (PoseStamped): The incoming message containing the robot's pose information.
+
+        Attributes:
+            robot_pose (numpy.ndarray): The 4x4 transformation matrix representing the robot's pose.
+            robot_pose_tick (int): The timestamp of the robot's pose in milliseconds.
+
+        Notes:
+            - The pose is composed using the position and orientation from the incoming message.
+            - The timestamp is calculated differently based on the pose estimator type.
+        """
         self.robot_pose = affines.compose(
             T=np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]),
             R=quaternions.quat2mat(
@@ -525,6 +521,16 @@ class WBCNode(Node):
         self.latest_tick = msg.tick
         imu_data = msg.imu_state
 
+        # Parse IMU data
+        acceleration = np.array(imu_data.accelerometer, dtype=np.float64)
+        quaternion = np.array(imu_data.quaternion, dtype=np.float64)
+        angular_velocity = self.angular_velocity_filter.calculate_average(
+            np.array(imu_data.gyroscope, dtype=np.float64)
+        )
+        # Get projected gravity
+        projected_gravity = quat_rotate_inv(quaternion, np.array([0, 0, -1]))
+        
+        # motor data
         self.quadruped_q = np.array(
             [motor_data.q for motor_data in msg.motor_state[:LEG_DOF]]
         )
@@ -534,34 +540,24 @@ class WBCNode(Node):
         self.quadruped_tau = np.array(
             [motor_data.tau_est for motor_data in msg.motor_state[:LEG_DOF]]
         )
-        acceleration = np.array(imu_data.accelerometer, dtype=np.float64)
-        quaternion = np.array(imu_data.quaternion, dtype=np.float64)
+
+        # Get foot contact force data
         foot_force = np.array(
             [msg.foot_force[foot_id] for foot_id in range(4)], dtype=np.float64
         )
 
-        angular_velocity = self.angular_velocity_filter.calculate_average(
-            np.array(imu_data.gyroscope, dtype=np.float64)
-        )
-
+        # Get arm data
         lowstate = self.arx5_joint_controller.get_state()
         arm_dof_pos = lowstate.pos().copy()
         arm_dof_vel = lowstate.vel().copy()
+
+        # Concatenate joint data
         dof_pos = (
             np.concatenate((reorder(self.quadruped_q), arm_dof_pos), axis=0)
-            * self.obs_dof_pos_scale
-            - self.obs_dof_pos_offset
         )
         dof_vel = (
             np.concatenate((reorder(self.quadruped_dq), arm_dof_vel), axis=0)
-            * self.obs_dof_vel_scale
         )
-        state_obs = [
-            dof_pos,  # 12
-            dof_vel,  # 12
-            quat_rotate_inv(quaternion, np.array([0, 0, -1])),  # 3 (gravity)
-            quat_rotate_inv(quaternion, angular_velocity) * 0.25,  # 3
-        ]
 
         #### Reaching Obs ####
 
@@ -664,6 +660,7 @@ class WBCNode(Node):
                     local_target_pose[..., :3, 3], -0.1, 0.1
                 )
 
+        # TODO: Remove observation scaling
         pos_obs = (local_target_pose[..., :3, 3] * self.pos_obs_scale).reshape(-1)
         orn_obs = (local_target_pose[..., :2, :3] * self.orn_obs_scale).reshape(-1)
         task_obs = np.concatenate((pos_obs, orn_obs), axis=0)
@@ -693,7 +690,6 @@ class WBCNode(Node):
                 "arm_dof_tau": lowstate.torque().copy(),
                 "dof_pos": dof_pos.copy(),
                 "dof_vel": dof_vel.copy(),
-                "state_obs": state_obs.copy(),
                 "curr_time_idx": self.curr_time_idx,
                 "gripper_pos_cmd": float(self.gripper_pos_cmd),
                 "target_indices": target_indices.copy(),
@@ -737,6 +733,8 @@ class WBCNode(Node):
         self.arx5_cmd.pos()[:] = q[12:]
         # send arm action
         self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
+
+        # Send leg command
         for i in range(LEG_DOF):
             self.motor_cmd[i].q = float(q[i])
         self.cmd_msg.motor_cmd = self.motor_cmd.copy()
@@ -769,7 +767,7 @@ class WBCNode(Node):
         if self.start_time == -1.0:
             return
 
-        if not self.start_policy:
+        if not self.start_policy: # First, make the robot stand up
             time_ratio = (
                 time.monotonic() - self.start_time - stand_up_buffer_time
             ) / stand_up_time
@@ -785,7 +783,7 @@ class WBCNode(Node):
             # send leg action
             self.set_motor_position(wbc_action, gripper_pos)
             self.motor_timer_callback()
-        elif (
+        elif ( # When the robot is standing up, the policy starts
             time.monotonic() - self.start_policy_time
             > self.policy_dt * self.policy_ctrl_iter - self.policy_dt_slack
         ):
@@ -794,6 +792,7 @@ class WBCNode(Node):
             self.obs_history_buf = torch.cat(
                 (self.obs_history_buf[:, 1:], new_obs[None, None, :]), dim=1
             )
+            # Policy action inference
             with torch.inference_mode():
                 action = self.actor(self.obs_history_buf.view(1, -1))[0]
                 # print(action.cpu().numpy())
@@ -804,6 +803,7 @@ class WBCNode(Node):
                         f"pos err: {self.get_reaching_pos_err_dir()*1e3} mm",
                         f"orn err: {self.get_reaching_orn_err():.03f}rad",
                     )
+                # Apply action scaling and offset
                 wbc_action = (
                     self.prev_action.copy() * self.action_scale + self.action_offset
                 )
