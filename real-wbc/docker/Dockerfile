@@ -59,6 +59,8 @@ RUN ARCH=$(uname -m) && wget https://github.com/conda-forge/miniforge/releases/l
     /home/${USERNAME}/miniforge3/bin/conda init zsh && \
     /home/${USERNAME}/miniforge3/bin/mamba init zsh
 
+#Ensure setuptools is at a specific version to avoid issues with the wx250s installation script later on
+# RUN /home/${USERNAME}/miniforge3/bin/pip install setuptools==65.5.0
 
 # pre-install vscode server and helpful plugins. This helps to reduce the time to edit the dockerfile and reopen the container.
 RUN git clone https://gist.github.com/0a16b6645ab7921b0910603dfb85e4fb.git /home/${USERNAME}/vscode-install && \
@@ -94,7 +96,8 @@ RUN apt-get update && \
     apt-get install -y \
     ros-humble-rmw-cyclonedds-cpp ros-humble-rosidl-generator-dds-idl \
     ros-humble-geometry-msgs ros-humble-ament-lint-auto ros-humble-rosidl-default-generators \
-    ros-humble-rviz2
+    ros-humble-rviz2 \
+    ros-humble-dynamixel-sdk
 
 USER ${USERNAME}
 
@@ -167,17 +170,16 @@ USER root
 # Setup spacenav and rosbag2 storage
 RUN apt-get update && \
     apt-get install -y ros-humble-rosbag2-storage-mcap && \
-    apt-get install -y libspnav-dev spacenavd
-    
+    apt-get install -y libspnav-dev spacenavd && \
+    apt-get install -f
+
+# Add supports for Interbotix WidowX 250s robot arm
+ENV ROBOT_MODEL="wx250s"
+RUN curl 'https://raw.githubusercontent.com/alvarobelmontebaeza/interbotix_ros_manipulators/refs/heads/main/interbotix_ros_xsarms/install/rpi4/xsarm_rpi4_install.sh' > xsarm_rpi4_install.sh
+RUN chmod +x xsarm_rpi4_install.sh
+RUN ./xsarm_rpi4_install.sh -d humble -n
 
 USER ${USERNAME}
 
-# Add supports for Interbotix WidowX 250s robot arm
-# Ensure setuptools is at a specific version to avoid issues with the installation script
-RUN /home/${USERNAME}/miniforge3/bin/pip install setuptools==65.5.0
-RUN apt install curl -y
-RUN curl 'https://raw.githubusercontent.com/Interbotix/interbotix_ros_manipulators/main/interbotix_ros_xsarms/install/rpi4/xsarm_rpi4_install.sh' > xsarm_rpi4_install.sh
-RUN chmod +x xsarm_rpi4_install.sh
-RUN ./xsarm_rpi4_install.sh -d humble -y
 RUN echo "source /opt/ros/humble/setup.zsh" >> /home/${USERNAME}/.zshrc && \
     echo "source /home/\${USERNAME}/interbotix_ws/install/setup.zsh" >> /home/${USERNAME}/.zshrc
