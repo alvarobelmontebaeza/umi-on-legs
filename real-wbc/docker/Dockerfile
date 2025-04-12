@@ -100,9 +100,10 @@ RUN apt-get update && \
     ros-humble-dynamixel-sdk \
     ros-humble-ros2topic \
     ros-humble-ros2service \
-    ros-humble-ros2msg \
     ros-humble-ros2param \
-    ros-humble-ros2run \
+    ros-humble-ros2msg \
+    ros-humble-ros2pkg \
+    ros-humble-ros2launch \
 
 USER ${USERNAME}
 
@@ -176,13 +177,15 @@ USER root
 RUN apt-get update && \
     apt-get install -y ros-humble-rosbag2-storage-mcap && \
     apt-get install -y libspnav-dev spacenavd && \
+    apt-get install apt-utils -y && \
     apt-get install -f
 
 # Add supports for Interbotix WidowX 250s robot arm
 ENV ROBOT_MODEL="wx250s"
+RUN apt install udev -y
 RUN curl 'https://raw.githubusercontent.com/alvarobelmontebaeza/interbotix_ros_manipulators/refs/heads/main/interbotix_ros_xsarms/install/rpi4/xsarm_rpi4_install.sh' > xsarm_rpi4_install.sh
 RUN chmod +x xsarm_rpi4_install.sh
-RUN ./xsarm_rpi4_install.sh -d humble -n
+RUN ./xsarm_rpi4_install.sh -d humble -n -p "/home/${USERNAME}/interbotix_ws"
 
 USER ${USERNAME}
 
