@@ -97,7 +97,12 @@ RUN apt-get update && \
     ros-humble-rmw-cyclonedds-cpp ros-humble-rosidl-generator-dds-idl \
     ros-humble-geometry-msgs ros-humble-ament-lint-auto ros-humble-rosidl-default-generators \
     ros-humble-rviz2 \
-    ros-humble-dynamixel-sdk
+    ros-humble-dynamixel-sdk \
+    ros-humble-ros2topic \
+    ros-humble-ros2service \
+    ros-humble-ros2msg \
+    ros-humble-ros2param \
+    ros-humble-ros2run \
 
 USER ${USERNAME}
 
