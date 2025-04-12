@@ -23,6 +23,5 @@
     // We suggest using zsh for better auto-completion and history management
     // If you do not have zsh installed, you can manually create a .zsh_history file in your home directory
     "source=${localEnv:HOME}${localEnv:USERPROFILE}/.zsh_history,target=/home/real/.zsh_history,type=bind",
-    "source=${localWorkspaceFolder}/../arx5-sdk,target=/home/real/arx5-sdk,type=bind",
   ],
 }
