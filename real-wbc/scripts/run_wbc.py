@@ -1,10 +1,5 @@
-import datetime
-import pytz
-import zarr
-import pickle
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 import argparse
 import os
 import sys
@@ -42,8 +37,6 @@ from unitree_go.msg import (
     LowCmd,
     MotorCmd,
 )
-import time
-import hydra
 from omegaconf import OmegaConf
 from geometry_msgs.msg import PoseStamped
 from rclpy.time import Time
@@ -64,8 +57,9 @@ import numpy as np
 import os
 import sys
 
-sys.path.append("/home/real/arx5-sdk/python")
-import arx5_interface as arx5
+# Interbotix SDK
+from interbotix_common_modules.common_robot.robot import robot_shutdown, robot_startup
+from interbotix_xs_modules.xs_robot.arm import InterbotixManipulatorXS
 
 
 from modules.wbc_node import WBCNode

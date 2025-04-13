@@ -64,9 +64,8 @@ import numpy as np
 import os
 import sys
 
-sys.path.append("/home/real/arx5-sdk/python")
-import arx5_interface as arx5
-
+from interbotix_common_modules.common_robot.robot import robot_shutdown, robot_startup
+from interbotix_xs_modules.xs_robot.arm import InterbotixManipulatorXS
 
 
 class WBCNode(Node):
@@ -97,12 +96,14 @@ class WBCNode(Node):
         
         self.prev_action = self.init_action
 
+        # Adjust based on actual robot configuration
         self.arm2base = affines.compose(
             T=np.array([0.085, 0.0, 0.094]),
             R=np.identity(3),
             Z=np.ones(3),
         )
 
+        '''
         # Tool center pose (tcp) in the UMI code base is different from the one in the arx5 sdk.
         # tcp is defined with z point forwards while arx5 ee pose is z pointing upwards.
         self.tcp2ee = affines.compose(
@@ -116,6 +117,7 @@ class WBCNode(Node):
             ),
             Z=np.ones(3),
         )
+        '''
 
         # -- INITIALIZE SUBSCRIBERS --
         self.joy_stick_sub = self.create_subscription(
@@ -159,23 +161,23 @@ class WBCNode(Node):
         self.gripper_pose_tick = -1
         self.gripper_pose_sub = self.create_subscription(
             PoseStamped,
-            "mocap/Arx5Gripper",
+            "mocap/WX250sGripper",
             self.gripper_pose_cb,
             low_state_history_depth,
         )
 
         # Initialize motor publisher
-        self.motor_pub = self.create_publisher(
+        self.go2_motor_pub = self.create_publisher(
             LowCmd, "lowcmd", low_state_history_depth
         )
-        self.cmd_msg = LowCmd()
+        self.go2_cmd_msg = LowCmd()
 
         # init motor command
         self.motor_cmd = [
             MotorCmd(q=POS_STOP_F, dq=VEL_STOP_F, tau=0.0, kp=0.0, kd=0.0, mode=0x01)
             for _ in range(SDK_DOF)
         ]
-        self.cmd_msg.motor_cmd = self.motor_cmd.copy()
+        self.go2_cmd_msg.motor_cmd = self.motor_cmd.copy()
         self.quadruped_kp = np.zeros(12)
         self.quadruped_kd = np.zeros(12)
 
@@ -219,64 +221,58 @@ class WBCNode(Node):
         self.key_is_pressed = False  # for key press event
 
         #  ------- ARM SETUP --------
-        self.arx5_joint_controller = arx5.Arx5JointController("X5", "can0")
+        self.wx250s = InterbotixManipulatorXS(
+            robot_model='wx250s',
+            group_name='arm',
+            gripper_name='gripper',
+        )
 
-        self.arx5_joint_controller.enable_background_send_recv()
-        self.arx5_gain = arx5.Gain()
-        self.gripper_pos_cmd = 0.05
+        # Initialize arm
+        robot_startup()
+
+        # Check that initialization was successful
+        if (self.wx250s.arm.group_info.num_joints < 6):
+            self.wx250s.get_node().logfatal(
+                'Robot initialization failed. Please check the robot and try again.'
+            )
+            robot_shutdown()
+            sys.exit()
+
+        # Set arm to position control and profile velocity mode
+        self.wx250s.core.robot_set_operating_modes(
+            cmd_type = 'group',
+            name = 'arm',
+            mode = 'position',
+            profile_type = 'velocity',
+            profile_velocity = 131, # Max velocity of 3.14 rad/s
+        )
         
-        self.arx5_config = self.arx5_joint_controller.get_robot_config()
+        # TODO: Set arm PD gains
+        self.wx250s.core.robot_set_motor_pid_gains(
+            cmd_type = 'group',
+            name = 'arm',
+            kp_pos = 5.0,
+            kd_pos = 0.5,
+        )
 
-        self.arx5_gain.kp()[:] = self.policy_kp[-6:]
-        self.arx5_gain.kd()[:] = self.policy_kd[-6:]
-        # self.arx5_gain.kd()[3] = 2.0
-        if (self.arx5_gain.kd()[3:] > 2.0).any():
-            # If the kd values are too high for the top 3 joints, the arm shakes violently
-            logging.error("KD values are too high for top joints")
-            input("Press [Enter] to continue")
-            self.arx5_gain.kd()[3] = 2.0
-        if (self.arx5_gain.kd()[:3] > 10.0).any():
-            # An internal bug in the previous arx5 sdk
-            logging.info("KD range updated from 0~50 to 0~5")
-            input("Press [Enter] to continue")
-            self.arx5_gain.kd()[:3] /= 10
-
-        self.arx5_gain.gripper_kp = 15.0
-        self.arx5_gain.gripper_kd = self.arx5_config.default_gripper_kd
-        self.arx5_joint_controller.reset_to_home()
-        self.arx5_joint_controller.set_gain(self.arx5_gain)
-        self.arx5_cmd = arx5.JointState()
-        self.arx5_cmd.gripper_pos = 0.0
-        self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
+        # Send arm to home position
+        self.wx250s.arm.go_to_home_pose()
+        self.wx250s.gripper.release()
+        self.wx250s_cmd = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        self.wx250s.arm.set_joint_positions(self.wx250s_cmd) # Should be same that home pose
+        
         self.start_time = -1.0
-        self.arx5_solver = arx5.Arx5Solver("/home/real/arx5-sdk/models/arx5_gopro.urdf")
-        print("Arx5Solver initialized")
-        # Reaching variables
         self.init_pos_err_tolerance = init_pos_err_tolerance
         self.init_orn_err_tolerance = init_orn_err_tolerance
 
-        # Communication with manipulation policies
+        # Broadcast the arm state
         self.eef_state_pub = self.create_publisher(
-            EEFState, "go2_arx5/eef_state", 1
+            EEFState, "WidowGo2/eef_state", 1
         )
-
-        
-        if use_realtime_target:
-            self.target_input_mode = "realtime"
-        else:
-            self.target_input_mode = "replay"  # Or realtime
-        self.realtime_target_traj_sub = self.create_subscription(
-            EEFTraj, "go2_arx5/eef_traj", self.realtime_target_traj_cb, 10
-        )
-        self.realtime_target_traj = RealtimeTraj()
-
-        self.task_obs_history = deque()
-        self.prev_pose_obs = None
-        self.pose_obs_integral = None
 
     def start(self):
-        lowstate = self.arx5_joint_controller.get_state()
-        self.init_arm_pos = lowstate.pos().copy()
+        current_arm_state = self.wx250s.arm.get_joint_positions()
+        self.init_arm_pos = current_arm_state.copy()
         self.start_time = time.monotonic()
 
     # obs history getters and setters
@@ -490,32 +486,6 @@ class WBCNode(Node):
                 self.key_is_pressed = False
 
     # @profile
-    def realtime_target_traj_cb(self, msg: EEFTraj):
-        translations = []
-        quaternions_wxyz = []
-        gripper_pos = []
-        timestamps = []
-        for i in range(len(msg.traj)):
-            translations.append(msg.traj[i].eef_pose[:3])
-            quaternions_wxyz.append(msg.traj[i].eef_pose[3:])
-            gripper_pos.append(msg.traj[i].gripper_pos)
-            timestamps.append(float(msg.traj[i].tick) / 1000)
-        translations = np.array(translations)
-        quaternions_wxyz = np.array(quaternions_wxyz)
-        gripper_pos = np.array(gripper_pos)
-        timestamps = np.array(timestamps)
-        self.realtime_target_traj.update(
-            translations,
-            quaternions_wxyz,
-            gripper_pos,
-            timestamps,
-            self.prev_obs_tick_s,
-            adaptive_latency_matching=True,  # TODO: add to config
-            smoothen_time=0.1  # TODO: add to config
-        )
-        # print(self.realtime_target_traj.interpolate(timestamps[0]))
-
-    # @profile
     def lowlevel_state_cb(self, msg: LowState):
         # imu data
         self.latest_tick = msg.tick
@@ -546,10 +516,10 @@ class WBCNode(Node):
             [msg.foot_force[foot_id] for foot_id in range(4)], dtype=np.float64
         )
 
-        # Get arm data
-        lowstate = self.arx5_joint_controller.get_state()
-        arm_dof_pos = lowstate.pos().copy()
-        arm_dof_vel = lowstate.vel().copy()
+        # ------ Get arm data ------       
+        arm_dof_pos = self.wx250s.arm.get_joint_positions().copy()
+        arm_dof_vel = self.wx250s.arm.get_joint_velocities().copy()
+        arm_dof_torque = self.wx250s.arm.get_joint_efforts().copy()
 
         # Concatenate joint data
         dof_pos = (
@@ -559,85 +529,19 @@ class WBCNode(Node):
             np.concatenate((reorder(self.quadruped_dq), arm_dof_vel), axis=0)
         )
 
-        #### Reaching Obs ####
-
-        task_obs = []
-        trajectory_time = max(
-            time.monotonic() - self.start_policy_time - self.time_to_replay, 0.0
-        )
-        self.curr_time_idx = (
-            int(np.rint(trajectory_time * self.replay_speed / 0.005))
-            if self.start_policy
-            else 0
-        )
-
-        target_indices = self.target_obs_index + self.curr_time_idx
-        if (time.monotonic() - self.start_policy_time - self.time_to_replay) < 0.0:
-            target_indices[:] = 0
-        if self.fix_at_init_pose:
-            self.curr_time_idx = 0
-            target_indices[:] = 0
-        target_indices = np.clip(
-            target_indices,
-            0,
-            len(self.target_pos_seq) - 1,
-            out=target_indices,  # speed up by using in-place operation
-        )
-
-        if self.target_input_mode == "replay":
-
-            self.gripper_pos_cmd = self.target_gripper_pos[
-                max(0, min(self.curr_time_idx, len(self.target_pos_seq) - 1))
-            ]
-            global_target_pose = np.zeros((len(target_indices), 4, 4))
-            global_target_pose[..., :3, 3] = self.target_pos_seq[target_indices]
-            global_target_pose[..., :3, :3] = self.target_rot_mat_seq[target_indices]
-            global_target_pose[..., 3, 3] = 1.0
-        elif self.target_input_mode == "realtime":
-            global_target_pose = np.zeros((len(target_indices), 4, 4))
-            global_target_pose[..., :3, 3] = self.target_pos_seq[target_indices]
-            global_target_pose[..., :3, :3] = self.target_rot_mat_seq[target_indices]
-            global_target_pose[..., 3, 3] = 1.0
-
-            if len(self.realtime_target_traj.timestamps) > 0:
-                realtime_pos, realtime_quat_wxyz, realtime_gripper_pos = (
-                    self.realtime_target_traj.interpolate(float(msg.tick) / 1000)
-                )
-
-                current_time = float(msg.tick) / 1000
-                future_timestamps = [current_time + t for t in self.target_obs_times]
-                realtime_pos, realtime_quat_wxyz, realtime_gripper_pos = (
-                    self.realtime_target_traj.interpolate_traj(future_timestamps)
-                )
-
-                for k in range(len(self.target_obs_times)):
-                    global_target_pose[k, :3, :3] = quaternions.quat2mat(
-                        realtime_quat_wxyz[k]
-                    )
-                global_target_pose[:, :3, 3] = realtime_pos
-                global_target_pose[:, 3, 3] = 1.0
-                self.gripper_pos_cmd = realtime_gripper_pos[0]
-
-        else:
-            raise ValueError(
-                f"Invalid self.target_input_mode: {self.target_input_mode}"
-            )
-
-        assert not self.target_relative_to_base
-        if self.pose_estimator == "mocap_gripper":
-            observation_link_pose = self.gripper_pose
-        else:
-            if self.target_relative_to_base:
-                observation_link_pose = self.robot_pose
-            else:
-                observation_link_pose = self.get_tcp_pose(arm_dof_pos.copy())
-
+        #### EEF Observation ####
         eef_state = EEFState()
+        # Get arm EE pose in arm base frame
+        arm_ee_transform = self.wx250s.arm.get_ee_pose()
+        # Transform arm EE pose to the robot base frame
+        self.arm_ee_transform = self.robot_pose @ self.arm2base @ arm_ee_transform
+        
+
         eef_state.tick = msg.tick
         eef_state.system_time = time.monotonic()
-        eef_state.eef_pose[0:3] = observation_link_pose[:3, 3]
-        eef_state.eef_pose[3:7] = quaternions.mat2quat(observation_link_pose[:3, :3])
-        eef_state.gripper_pos = lowstate.gripper_pos
+        eef_state.eef_pose[0:3] = self.arm_ee_transform[:3, 3]
+        eef_state.eef_pose[3:7] = quaternions.mat2quat(self.arm_ee_transform[:3, :3])
+        eef_state.gripper_pos = self.wx250s.gripper.get_gripper_position()
 
         self.eef_state_pub.publish(eef_state)
 
@@ -647,10 +551,10 @@ class WBCNode(Node):
         elif self.pose_estimator == "mocap_gripper" and self.gripper_pose_tick == -1:
             return
 
-        local_target_pose = (
-            np.linalg.inv(observation_link_pose[None, :, :]) @ global_target_pose
-        )
+        # Get the target pose in robot frame
+        local_target_pose = np.linalg.inv(self.robot_pose) @ global_target_pose
 
+        # TODO: Revise criteria to validate targets
         if self.start_policy:
             if np.any(np.abs(local_target_pose[0, :3, 3]) > 0.5):
                 self.emergency_stop()
@@ -661,8 +565,8 @@ class WBCNode(Node):
                 )
 
         # TODO: Remove observation scaling
-        pos_obs = (local_target_pose[..., :3, 3] * self.pos_obs_scale).reshape(-1)
-        orn_obs = (local_target_pose[..., :2, :3] * self.orn_obs_scale).reshape(-1)
+        pos_obs = (local_target_pose[..., :3, 3]).reshape(-1)
+        orn_obs = (local_target_pose[..., :2, :3]).reshape(-1)
         task_obs = np.concatenate((pos_obs, orn_obs), axis=0)
 
 
@@ -687,7 +591,7 @@ class WBCNode(Node):
                 "angular_velocity": angular_velocity.copy(),
                 "arm_dof_pos": arm_dof_pos.copy(),
                 "arm_dof_vel": arm_dof_vel.copy(),
-                "arm_dof_tau": lowstate.torque().copy(),
+                "arm_dof_tau": arm_dof_torque.copy(),
                 "dof_pos": dof_pos.copy(),
                 "dof_vel": dof_vel.copy(),
                 "curr_time_idx": self.curr_time_idx,
@@ -711,8 +615,11 @@ class WBCNode(Node):
 
     def motor_timer_callback(self):
         cb_start_time = time.monotonic()
-        self.cmd_msg.crc = get_crc(self.cmd_msg)
-        self.motor_pub.publish(self.cmd_msg)
+        # send arm action
+        self.wx250s.arm.set_joint_positions(self.wx250s_cmd)
+        # Send legs action
+        self.go2_cmd_msg.crc = get_crc(self.go2_cmd_msg)
+        self.go2_motor_pub.publish(self.go2_cmd_msg)
 
     def set_gains(self, kp: np.ndarray, kd: np.ndarray):
         self.quadruped_kp = kp
@@ -724,20 +631,15 @@ class WBCNode(Node):
     def set_motor_position(
         self,
         q: np.ndarray,
-        gripper_pos: float,
     ):
         assert len(q) == 18
         # prepare arm action
-        self.arx5_cmd = arx5.JointState()
-        self.arx5_cmd.gripper_pos = gripper_pos
-        self.arx5_cmd.pos()[:] = q[12:]
-        # send arm action
-        self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
+        self.wx250s_cmd = q[12:]
 
-        # Send leg command
+        # prepare leg command
         for i in range(LEG_DOF):
             self.motor_cmd[i].q = float(q[i])
-        self.cmd_msg.motor_cmd = self.motor_cmd.copy()
+        self.go2_cmd_msg.motor_cmd = self.motor_cmd.copy()
 
     def emergency_stop(self):
         if self.debug_log:
@@ -756,13 +658,6 @@ class WBCNode(Node):
         stand_kd = np.ones(12) * 0.5
         stand_up_time = 5.0
         stand_up_buffer_time = 0.0
-
-        try:
-            translation, quaternion_wxyz, gripper_pos = (
-                self.realtime_target_traj.interpolate(self.prev_obs_tick_s)
-            )
-        except ValueError as e:
-            pass
 
         if self.start_time == -1.0:
             return
@@ -828,18 +723,23 @@ class WBCNode(Node):
                 self.action_history_log.append(action_dict)
             # logging.info(f"Finish policy_timer_callback {time.monotonic() - cb_start_time:.04f}s")
 
-    def init_policy(self, ckpt_path: str, pickle_path: str, traj_idx: int):
+    def init_policy(self, ckpt_path: str, pickle_path: str):
         logging.info("Preparing policy")
         faulthandler.enable()
 
+        # Load config file
         config = pickle.load(
             open(os.path.join(os.path.dirname(ckpt_path), "config.pkl"), "rb")
         )
+
+        # ------- CONFIG SETUP --------
+        # Policy frequency
         self.policy_freq = 1 / (
             config["env"]["cfg"]["sim"]["dt"]
             * np.mean(config["env"]["controller"]["decimation_count"])
         )
 
+        # Observation and action dims
         self.obs_history_len = int(config["env"]["obs_history_len"])
         print(self.obs_history_len)
         self.obs_dim = int(config["env"]["cfg"]["env"]["num_observations"])
@@ -848,14 +748,8 @@ class WBCNode(Node):
             self.obs_dim * self.obs_history_len,
             device=self.device,
         )
-        if "PPODistillation" not in config["runner"]["alg"]["_target_"]:
-            placeholder_obs = torch.rand(
-                config["runner"]["alg"]["actor_critic"]["actor"]["_args_"][0][
-                    "in_features"
-                ],
-                device=self.device,
-            )
 
+        # Action scales and offsets
         self.action_offset = (
             torch.Tensor(config["env"]["controller"]["offset"]["data"]).cpu().numpy()
         )
@@ -864,92 +758,49 @@ class WBCNode(Node):
             if "fill_value" in config["env"]["controller"]["scale"]
             else np.array(list(config["env"]["controller"]["scale"]["data"]))
         )
-        self.obs_dof_pos_scale = float(config["env"]["state_obs"]["dof_pos"]["scale"])
-        self.obs_dof_pos_offset = np.array(
-            config["env"]["state_obs"]["dof_pos"]["offset"]["data"]
-        )
-        self.obs_dof_vel_scale = float(config["env"]["state_obs"]["dof_vel"]["scale"])
+        # self.obs_dof_pos_scale = float(config["env"]["state_obs"]["dof_pos"]["scale"])
+        # self.obs_dof_pos_offset = np.array(
+        #     config["env"]["state_obs"]["dof_pos"]["offset"]["data"]
+        # )
+        # self.obs_dof_vel_scale = float(config["env"]["state_obs"]["dof_vel"]["scale"])
 
-        if "PPODistillation" not in config["runner"]["alg"]["_target_"]:
-            # vanilla actor critic
-            # load policy
-            actor = hydra.utils.instantiate(
-                config["runner"]["alg"]["actor_critic"]["actor"]
-            )
-            print(actor)
-            ckpt = torch.load(ckpt_path, map_location=self.device)
-            actor_state_dict = {
-                k.split("actor.")[-1]: v
-                for k, v in ckpt["model_state_dict"].items()
-                if str(k).startswith("actor.")
-            }
-            actor.load_state_dict(actor_state_dict)
-            with torch.inference_mode():
-                actor.eval()
-                actor = actor.to(self.device, torch.float32)
-                traced_actor = torch.jit.trace(actor, placeholder_obs)
-                traced_actor = torch.jit.freeze(traced_actor)
-            self.actor = traced_actor
-            with torch.inference_mode():
-                self.actor(placeholder_obs[None, :])
-        elif "PPODistillation" in config["runner"]["alg"]["_target_"]:
-            distilled_policy = hydra.utils.instantiate(
-                config["runner"]["alg"]["distilled_policy"]
-            )
-            ckpt = torch.load(ckpt_path, map_location=self.device)["model_state_dict"]
-            if "distilled_policy_ema" in ckpt:
-                distilled_policy.load_state_dict(ckpt["distilled_policy"], strict=False)
-                distilled_policy.ema_nets.load_state_dict(ckpt["distilled_policy_ema"])
-                distilled_policy.ema.averaged_model.load_state_dict(
-                    ckpt["distilled_policy_ema"]
-                )
-                distilled_policy.action_norm_config.min_value = ckpt["action_min"]
-                distilled_policy.action_norm_config.max_value = ckpt["action_max"]
-            else:
-                distilled_policy.load_state_dict(ckpt["distilled_policy"], strict=False)
-            distilled_policy.eval()
-            distilled_policy = distilled_policy.to(self.device)
-            self.actor = distilled_policy
-            diffusion_policy = typing.cast(DiffusionPolicy, distilled_policy)
-            diffusion_policy.ema.averaged_model["obs_encoder"] = torch.jit.freeze(
-                torch.jit.trace(
-                    diffusion_policy.ema.averaged_model["obs_encoder"], placeholder_obs
-                )
-            )
-            self.actor(placeholder_obs[None, :])
+        # ----- POLICY LOADING ------
+        # load policy
+        self.policy = torch.jit.load(ckpt_path, map_location=self.device)
+        self.policy.eval()
 
+        # Test loaded policy and retrieve metrics
         policy_inference_times = []
         with torch.no_grad():
             for _ in range(50):
                 start = time.time()
-                self.actor(
+                self.policy(
                     placeholder_obs[None, :]
-                )  # should be around 3.244400024414063e-05 (3.4975774448309935e-05)
+                )
                 policy_inference_times.append(float(time.time() - start))
         logging.info(
             f"Policy inference time: {np.mean(policy_inference_times)} ({np.std(policy_inference_times)})"
         )
+
+        # -------- CONTROL PARAMS --------
         # init p_gains, d_gains, torque_limits, default_dof_pos_all
         self.policy_kp = np.zeros(18)
         self.policy_kd = np.zeros(18)
-        if "fill_value" in config["env"]["controller"]["kp"]:
-            self.policy_kp[:] = float(config["env"]["controller"]["kp"]["fill_value"])
-        else:
-            self.policy_kp[:] = config["env"]["controller"]["kp"]["data"]
+        # Leg gains
+        self.policy_kp[:12] = float(config["env"]["controller"]["kp"]["fill_value"])
+        self.policy_kd[:12] = float(config["env"]["controller"]["kd"]["fill_value"])
+        # Arm gains
+        self.policy_kp[12:] = float(config["env"]["controller"]["arm_kp"]["fill_value"])
+        self.policy_kd[12:] = float(config["env"]["controller"]["arm_kd"]["fill_value"])
 
-        if "fill_value" in config["env"]["controller"]["kd"]:
-            self.policy_kd[:] = float(config["env"]["controller"]["kd"]["fill_value"])
-        else:
-            self.policy_kd[:] = config["env"]["controller"]["kd"]["data"]
-
-        init_pose = reorder(self.obs_dof_pos_offset)
+        init_pose = reorder(self.obs_dof_pos_offset) # TODO: check if this is correct
         for i in range(LEG_DOF):
             self.motor_cmd[i].q = init_pose[i]
             self.motor_cmd[i].dq = 0.0
             self.motor_cmd[i].tau = 0.0
             self.motor_cmd[i].kp = 0.0  # self.env.p_gains[i]  # 30
             self.motor_cmd[i].kd = 0.0  # float(self.env.d_gains[i])  # 0.6
-        self.cmd_msg.motor_cmd = self.motor_cmd.copy()
+        self.go2_cmd_msg.motor_cmd = self.motor_cmd.copy()
 
         logging.info("starting to play policy")
         logging.info(
@@ -960,118 +811,19 @@ class WBCNode(Node):
             + f"action_offset: {self.action_offset},"
             + f"action_scale: {self.action_scale}"
         )
-        # task specific parameters
-        self.pos_obs_scale = float(config["env"]["tasks"]["reaching"]["pos_obs_scale"])
-        self.orn_obs_scale = float(config["env"]["tasks"]["reaching"]["orn_obs_scale"])
 
-        target_obs_times = [
-            # float(t) * 0.05
-            float(t) * 0.0
-            for t in config["env"]["tasks"]["reaching"]["target_obs_times"]
-        ]
-        self.target_obs_index = np.array(
-            [int(np.rint(t * 200.0)) for t in target_obs_times]
-        )
-        print(self.target_obs_index, target_obs_times)
-        self.target_obs_times = target_obs_times
-        self.target_relative_to_base = bool(
-            config["env"]["tasks"]["reaching"]["target_relative_to_base"]
-        )
-        if self.target_relative_to_base:
-            logging.info("Reaching target poses are relative to the base frame. ")
-        else:
-            logging.info(
-                "Reaching target poses are relative to the end effector frame. "
-            )
-        # 1500 @ 200Hz is 7.5 seconds
-        # NOTE this must be in the odometry frame
-        episodes = pickle.load(open(pickle_path, "rb"))
-        episode = episodes[traj_idx]
-        self.target_pos_seq = episode["ee_pos"]
-        # self.target_rot_mat_seq = (
-        #     pt3d.axis_angle_to_matrix(torch.from_numpy(episode["ee_pos"])).cpu().numpy()
-        # )
-        self.target_rot_mat_seq = np.zeros((len(self.target_pos_seq), 3, 3))
-        for i, ee_axis_angle in enumerate(episode["ee_axis_angle"]):
-            angle = np.linalg.norm(ee_axis_angle)
-            axis = ee_axis_angle / angle
-            self.target_rot_mat_seq[i, :, :] = axangles.axangle2mat(
-                axis=axis, angle=angle
-            )
-        self.target_gripper_pos = episode["gripper_width"]
+        # Initialize target position and quaternion
+        self.target_pos = np.zeros((3,), dtype=np.float32)
+        self.target_rot = np.zeros((4,), dtype=np.float32)
 
-        self.target_gripper_pos = np.concatenate(
-            (self.target_gripper_pos, np.array([self.target_gripper_pos[-1]] * 200)),
-            axis=0,
-        )
-
-        self.target_rot_mat_seq = np.concatenate(
-            (self.target_rot_mat_seq, np.array([self.target_rot_mat_seq[-1]] * 200)),
-            axis=0,
-        )
-        self.target_pos_seq = np.concatenate(
-            (
-                self.target_pos_seq,
-                np.linspace(self.target_pos_seq[-1], self.target_pos_seq[0], 200),
-            ),
-            axis=0,
-        )
-        logging.info(
-            f"Loaded target sequence: {self.target_gripper_pos.shape}, {self.target_pos_seq.shape}"
-        )
-        self.curr_time_idx = 0
         return config
 
-    def get_reaching_pos_err(self, time_idx: Optional[int] = None) -> float:
-        if self.target_input_mode == "realtime":
-            if len(self.realtime_target_traj.timestamps) == 0:
-                return 10000.0
-            curr_target_pos = (
-                self.realtime_target_traj.interpolate(float(self.latest_tick) / 1000)
-            )[0]
-        elif self.target_input_mode == "replay":
-            curr_target_pos = self.target_pos_seq[
-                self.curr_time_idx if time_idx is None else time_idx
-            ]
-        else:
-            raise NotImplementedError(
-                f"Invalid target_input_mode: {self.target_input_mode}"
-            )
+    def get_reaching_pos_err(self) -> float:
+        curr_target_pos = self.target_pos
         return float(np.linalg.norm(self.get_obs_link_pose()[:3, 3] - curr_target_pos))
 
-    def get_reaching_pos_err_dir(self, time_idx: Optional[int] = None) -> float:
-        if self.target_input_mode == "realtime":
-            if len(self.realtime_target_traj.timestamps) == 0:
-                return 10000.0
-            curr_target_pos = (
-                self.realtime_target_traj.interpolate(float(self.latest_tick) / 1000)
-            )[0]
-        elif self.target_input_mode == "replay":
-            idx = self.curr_time_idx if time_idx is None else time_idx
-            idx = min(idx, self.target_pos_seq.shape[0] - 1)
-            curr_target_pos = self.target_pos_seq[idx]
-        else:
-            raise NotImplementedError(
-                f"Invalid target_input_mode: {self.target_input_mode}"
-            )
-        return self.get_obs_link_pose()[:3, 3] - curr_target_pos
-
-    def get_reaching_orn_err(self, time_idx: Optional[int] = None) -> float:
-        if self.target_input_mode == "realtime":
-            if len(self.realtime_target_traj.timestamps) == 0:
-                return 10000.0
-            realtime_quat_wxyz = (
-                self.realtime_target_traj.interpolate(float(self.latest_tick) / 1000)
-            )[1]
-            curr_target_rot = quaternions.quat2mat(realtime_quat_wxyz)
-        elif self.target_input_mode == "replay":
-            idx = self.curr_time_idx if time_idx is None else time_idx
-            idx = min(idx, self.target_pos_seq.shape[0] - 1)
-            curr_target_rot = self.target_rot_mat_seq[idx]
-        else:
-            raise NotImplementedError(
-                f"Invalid target_input_mode: {self.target_input_mode}"
-            )
+    def get_reaching_orn_err(self) -> float:
+        
         tcp_rot_mat = self.get_obs_link_pose()[:3, :3]
         rot_err_mat = curr_target_rot.T @ tcp_rot_mat
         trace = np.trace(rot_err_mat)
@@ -1086,28 +838,30 @@ class WBCNode(Node):
         )
         return rotation_magnitude
 
-    def get_tcp_pose(self, arm_dof_pos: np.ndarray) -> np.ndarray:
+    def get_tcp_pose(self) -> np.ndarray:
         """
-        In the iphone pose frame
-        """
-        arx5_ee_pose = self.arx5_solver.forward_kinematics(arm_dof_pos)
+        In task frame
+        """ 
+        # Obtain the current arm end effector pose
+        # in the arm base frame
+        wx250s_ee_pose = self.wx250s.arm.get_ee_pose()
+        # Convert from numpy array to affine transformation
         ee2arm = affines.compose(
-            T=arx5_ee_pose[:3], R=euler.euler2mat(*arx5_ee_pose[3:]), Z=np.ones(3)
+            T=wx250s_ee_pose[:3, 3], R=wx250s_ee_pose[:3, :3], Z=np.ones(3)
         )
-        return self.robot_pose @ self.arm2base @ ee2arm @ self.tcp2ee
+        # Return the end effector pose in the task frame
+        return self.robot_pose @ self.arm2base @ ee2arm
 
     def get_obs_link_pose(self) -> np.ndarray:
         if self.pose_estimator in ["iphone", "mocap"]:
-            return self.get_tcp_pose(
-                arm_dof_pos=self.arx5_joint_controller.get_state().pos().copy()
-            )
+            return self.get_tcp_pose()
         elif self.pose_estimator == "mocap_gripper":
             return self.gripper_pose
 
     def dump_logs(self):
         obs_history_log = self.obs_history_log
         action_history_log = self.action_history_log
-        timezone = pytz.timezone("US/Pacific")
+        timezone = pytz.timezone("Europe/Madrid")
         timestamp = datetime.datetime.now(timezone).strftime("%Y%m%d_%H%M%S")
         logging.info(f"Dumping logs to {self.logging_dir}/{timestamp}")
         dump_start_time = time.monotonic()
