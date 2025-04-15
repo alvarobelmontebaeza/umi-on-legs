@@ -4,7 +4,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    zsh neovim tmux git htop curl wget \
+    # zsh \
+    neovim tmux git htop curl wget \
     net-tools iputils-ping\
     # init certificate for curl
     ca-certificates \
@@ -30,37 +31,36 @@ RUN usermod -aG sudo ${USERNAME}
 RUN chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}
 USER ${USERNAME}
 # Set the user's home directory as the working directory
+# add to bashrc
+RUN echo "export USERNAME=${USERNAME}" >> /home/${USERNAME}/.bashrc
 WORKDIR /home/${USERNAME}
 
 
 ############### Development Tools ###############
 
 # install and setup zsh (with oh-my-zsh and plugins)
-RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" 
-ARG PLUGIN_DIR=/home/${USERNAME}/.oh-my-zsh/custom/plugins/
-RUN git clone https://github.com/marlonrichert/zsh-autocomplete.git $PLUGIN_DIR/zsh-autocomplete && \
-    git clone https://github.com/zsh-users/zsh-autosuggestions $PLUGIN_DIR/zsh-autosuggestions  && \
-    git clone https://github.com/zsh-users/zsh-syntax-highlighting.git $PLUGIN_DIR/zsh-syntax-highlighting
+# RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" 
+# ARG PLUGIN_DIR=/home/${USERNAME}/.oh-my-zsh/custom/plugins/
+# RUN git clone https://github.com/marlonrichert/zsh-autocomplete.git $PLUGIN_DIR/zsh-autocomplete && \
+#     git clone https://github.com/zsh-users/zsh-autosuggestions $PLUGIN_DIR/zsh-autosuggestions  && \
+#     git clone https://github.com/zsh-users/zsh-syntax-highlighting.git $PLUGIN_DIR/zsh-syntax-highlighting
 
 # Set up zsh plugins and theme
 # And some key bindings: ctrl-R to search in the history, ctlr-backspace to delete a word, etc.
-RUN mv /home/${USERNAME}/.zshrc /home/${USERNAME}/.zshrc.bak && \
-    echo 'export ZSH="$HOME/.oh-my-zsh"\nplugins=(\n  git\n  zsh-autosuggestions\n  zsh-autocomplete\n  zsh-syntax-highlighting\n  themes\n)\n' >> /home/${USERNAME}/.zshrc && \
-    echo 'ZSH_THEME="eastwood"\nsource $ZSH/oh-my-zsh.sh' >> /home/${USERNAME}/.zshrc && \
-    echo 'bindkey -M menuselect "\\r" .accept-line' >> /home/${USERNAME}/.zshrc && \
-    echo 'bindkey -M menuselect -s "^R" "^_^_^R" "^S" "^_^_^S"' >> /home/${USERNAME}/.zshrc && \
-    echo 'bindkey -M menuselect "\\e[D" .backward-char "\\eOD" .backward-char "\\e[C" .forward-char "\\eOC" .forward-char' >> /home/${USERNAME}/.zshrc && \
-    echo 'bindkey '^H' backward-kill-word' >> /home/${USERNAME}/.zshrc
+# RUN mv /home/${USERNAME}/.zshrc /home/${USERNAME}/.zshrc.bak && \
+#     echo 'export ZSH="$HOME/.oh-my-zsh"\nplugins=(\n  git\n  zsh-autosuggestions\n  zsh-autocomplete\n  zsh-syntax-highlighting\n  themes\n)\n' >> /home/${USERNAME}/.zshrc && \
+#     echo 'ZSH_THEME="eastwood"\nsource $ZSH/oh-my-zsh.sh' >> /home/${USERNAME}/.zshrc && \
+#     echo 'bindkey -M menuselect "\\r" .accept-line' >> /home/${USERNAME}/.zshrc && \
+#     echo 'bindkey -M menuselect -s "^R" "^_^_^R" "^S" "^_^_^S"' >> /home/${USERNAME}/.zshrc && \
+#     echo 'bindkey -M menuselect "\\e[D" .backward-char "\\eOD" .backward-char "\\e[C" .forward-char "\\eOC" .forward-char' >> /home/${USERNAME}/.zshrc && \
+#     echo 'bindkey '^H' backward-kill-word' >> /home/${USERNAME}/.zshrc
 
-# Setup python env (we prefer mamba to conda for faster installation)
-RUN ARCH=$(uname -m) && wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-${ARCH}.sh && \
-    bash Miniforge3-Linux-${ARCH}.sh -b -p /home/${USERNAME}/miniforge3 && \
-    rm Miniforge3-Linux-${ARCH}.sh && \
-    /home/${USERNAME}/miniforge3/bin/conda init zsh && \
-    /home/${USERNAME}/miniforge3/bin/mamba init zsh
-
-#Ensure setuptools is at a specific version to avoid issues with the wx250s installation script later on
-# RUN /home/${USERNAME}/miniforge3/bin/pip install setuptools==65.5.0
+# Setup python env with Python 3.10 by default
+RUN ARCH=$(uname -m) && wget https://github.com/conda-forge/miniforge/releases/download/24.3.0-0/Miniforge3-24.3.0-0-Linux-${ARCH}.sh && \
+    bash Miniforge3-24.3.0-0-Linux-${ARCH}.sh -b -p /home/${USERNAME}/miniforge3 && \
+    rm Miniforge3-24.3.0-0-Linux-${ARCH}.sh && \
+    /home/${USERNAME}/miniforge3/bin/conda init bash && \
+    /home/${USERNAME}/miniforge3/bin/mamba init bash
 
 # pre-install vscode server and helpful plugins. This helps to reduce the time to edit the dockerfile and reopen the container.
 RUN git clone https://gist.github.com/0a16b6645ab7921b0910603dfb85e4fb.git /home/${USERNAME}/vscode-install && \
@@ -76,7 +76,7 @@ RUN code-server --install-extension ms-python.python && \
     code-server --install-extension ms-python.black-formatter
 
 # Enable using `code` command in terminal to open file or attach new window to a folder
-RUN echo "export PATH=/home/${USERNAME}/.vscode-server/bin/default_version/bin/remote-cli:\$PATH" >> /home/${USERNAME}/.zshrc
+RUN echo "export PATH=/home/${USERNAME}/.vscode-server/bin/default_version/bin/remote-cli:\$PATH" >> /home/${USERNAME}/.bashrc
 
 
 # Install pytorch. 
@@ -98,13 +98,7 @@ RUN apt-get update && \
     ros-humble-geometry-msgs ros-humble-ament-lint-auto ros-humble-rosidl-default-generators \
     ros-humble-rviz2 \
     ros-humble-dynamixel-sdk \
-    ros-humble-ros2topic \
-    ros-humble-ros2service \
-    ros-humble-ros2param \
-    ros-humble-ros2msg \
-    ros-humble-ros2pkg \
-    ros-humble-ros2launch \
-
+    ros-humble-ros2*
 USER ${USERNAME}
 
 # Install unitree ros
@@ -117,10 +111,10 @@ RUN git clone https://github.com/unitreerobotics/unitree_ros2.git && \
 
 RUN cd unitree_ros2/cyclonedds_ws && \
     /home/${USERNAME}/miniforge3/bin/pip install empy==3.3.2 catkin_pkg pyparsing lark && \
-    /bin/zsh -c "cd ~/unitree_ros2/cyclonedds_ws && source /opt/ros/humble/setup.zsh && colcon build"
+    /bin/bash -c "cd ~/unitree_ros2/cyclonedds_ws && source /opt/ros/humble/setup.bash && colcon build"
 
-RUN sed -i "s/\\\\\\\\/\\\\/g" /home/${USERNAME}/.zshrc && \
-    sed -i "s/\\\\n/\\n/g" /home/${USERNAME}/.zshrc
+RUN sed -i "s/\\\\\\\\/\\\\/g" /home/${USERNAME}/.bashrc && \
+    sed -i "s/\\\\n/\\n/g" /home/${USERNAME}/.bashrc
 
 
 # Install the customized unitree sdk for 
@@ -135,16 +129,16 @@ RUN git clone https://github.com/yihuai-gao/unitree_sdk2.git && \
     cd ../python && mkdir build && cd build &&  \
     cmake .. -DPYBIND_PATH=$(/home/${USERNAME}/miniforge3/bin/pip show pybind11 | grep Location | cut -d' ' -f2) && \
     make -j$(($(nproc)-1)) && \
-    echo "export PYTHONPATH=\$PYTHONPATH:/home/${USERNAME}/unitree_sdk2/python" >> /home/${USERNAME}/.zshrc
+    echo "export PYTHONPATH=\$PYTHONPATH:/home/${USERNAME}/unitree_sdk2/python" >> /home/${USERNAME}/.bashrc
 
 USER root
 RUN cd /home/${USERNAME}/unitree_sdk2 && ./install.sh
 
 USER ${USERNAME}
 
-RUN echo "source /opt/ros/humble/install/setup.zsh" >> /home/${USERNAME}/.zshrc && \
-    echo "source /home/\${USERNAME}/unitree_ros2/cyclonedds_ws/install/setup.zsh" >> /home/${USERNAME}/.zshrc && \
-    echo "export CYCLONEDDS_URI=/home/\${USERNAME}/unitree_ros2/cyclonedds_ws/src/cyclonedds.xml" >> /home/${USERNAME}/.zshrc && \
+RUN echo "source /opt/ros/humble/install/setup.bash" >> /home/${USERNAME}/.bashrc && \
+    echo "source /home/\${USERNAME}/unitree_ros2/cyclonedds_ws/install/setup.bash" >> /home/${USERNAME}/.bashrc && \
+    echo "export CYCLONEDDS_URI=/home/\${USERNAME}/unitree_ros2/cyclonedds_ws/src/cyclonedds.xml" >> /home/${USERNAME}/.bashrc && \
     sed -i "s/enp2s0/eth0/g" /home/${USERNAME}/unitree_ros2/cyclonedds_ws/src/cyclonedds.xml
 
 RUN /home/${USERNAME}/miniforge3/bin/pip install transforms3d hydra-core filterpy numba omegaconf gitpython zarr rich python-socketio eventlet
@@ -154,7 +148,8 @@ RUN /home/${USERNAME}/miniforge3/bin/mamba install -y matplotlib seaborn
 USER root
 
 RUN apt-get update && \
-    apt-get install -y git zsh curl git vim net-tools wget htop \
+    #zsh\
+    apt-get install -y git curl git vim net-tools wget htop \ 
     x11-apps neofetch build-essential libboost-all-dev libeigen3-dev && \
     apt-get install libtinyxml2-dev libcppunit-dev liborocos-kdl-dev liburdfdom-dev iproute2 -y
 RUN ln -s /usr/include/eigen3/Eigen /usr/local/include/Eigen
@@ -169,7 +164,7 @@ RUN git clone https://github.com/ros/kdl_parser.git && \
 
 
 USER ${USERNAME}
-RUN echo "source /home/\${USERNAME}/real-wbc/ros2/install/setup.zsh" >> /home/${USERNAME}/.zshrc
+RUN echo "source /home/\${USERNAME}/real-wbc/ros2/install/setup.bash" >> /home/${USERNAME}/.bashrc
 
 USER root
 
@@ -189,5 +184,5 @@ RUN ./xsarm_rpi4_install.sh -d humble -n -p "/home/${USERNAME}/interbotix_ws"
 
 USER ${USERNAME}
 
-RUN echo "source /opt/ros/humble/setup.zsh" >> /home/${USERNAME}/.zshrc && \
-    echo "source /home/\${USERNAME}/interbotix_ws/install/setup.zsh" >> /home/${USERNAME}/.zshrc
+RUN echo "source /opt/ros/humble/setup.bash" >> /home/${USERNAME}/.bashrc && \
+    echo "source /home/\${USERNAME}/interbotix_ws/install/setup.bash" >> /home/${USERNAME}/.bashrc
