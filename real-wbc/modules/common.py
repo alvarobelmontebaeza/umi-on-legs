@@ -82,7 +82,7 @@ torque_limits: Dict[int, float] = {
 def rematch_joint_order(
     prev_joint_order: List[MotorId],
     new_joint_order: List[MotorId],
-    prev_val: npt.NDArray[np.float64],
+    prev_val: np.NDArray[np.float64],
 ):
     assert len(prev_joint_order) == len(new_joint_order)
     # assert prev_val.shape == (len(prev_joint_order),)
