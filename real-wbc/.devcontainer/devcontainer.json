@@ -10,6 +10,7 @@
   "runArgs": [
     "--network=host",
     "--volume=/tmp/.X11-unix/:/tmp/.X11-unix/", // For GUI display
+    "--device=/dev/ttyDXL:/dev/ttyDXL",
     "--runtime=nvidia", // For cuda kernels (not used in wbc)
   ],
   "remoteEnv": {
