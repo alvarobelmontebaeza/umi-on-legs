@@ -184,5 +184,8 @@ RUN ./xsarm_rpi4_install.sh -d humble -n -p "/home/${USERNAME}/interbotix_ws"
 
 USER ${USERNAME}
 
+# Install modern robotics package used for FK and IK
+RUN /home/${USERNAME}/miniforge3/bin/pip install modern_robotics
+
 RUN echo "source /opt/ros/humble/setup.bash" >> /home/${USERNAME}/.bashrc && \
     echo "source /home/\${USERNAME}/interbotix_ws/install/setup.bash" >> /home/${USERNAME}/.bashrc
