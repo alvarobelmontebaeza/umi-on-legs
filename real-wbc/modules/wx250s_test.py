@@ -7,6 +7,7 @@ from rclpy.node import Node
 import numpy as np
 import os
 import sys
+import time
 
 from interbotix_common_modules.common_robot.robot import robot_shutdown, robot_startup
 from interbotix_xs_modules.xs_robot.arm import InterbotixManipulatorXS
@@ -56,12 +57,14 @@ class WX250sTestNode(Node):
         self.wx250s.core.robot_set_motor_pid_gains(
             cmd_type="group",
             name="arm",
-            kp_pos= 5.0,
-            kd_pos= 0.5,
+            kp_pos= 800,
+            kd_pos= 80,
         )
 
         # Move the arm to the home position
-        self.wx250s.go_to_home_pose()
+        self.wx250s.arm.go_to_home_pose()
+        print("Waiting for arm to reach home position...")
+        time.sleep(5.0)
         ee_T = self.wx250s.arm.get_ee_pose()
 
         euler = ang.rotation_matrix_to_euler_angles(
@@ -74,11 +77,12 @@ class WX250sTestNode(Node):
         self.joint_positions = torch.zeros(6, dtype=torch.float32, device=self.device)
         self.joint_velocities = torch.zeros(6, dtype=torch.float32, device=self.device)
         self.pose_command = torch.zeros(7, dtype=torch.float32, device=self.device)
-        self.pose_command[0:3] = torch.tensor(ee_T[:3,3], dtype=torch.float32, device=self.device)  # x, y, z
+        self.pose_command[0:3] = torch.tensor([0.47, 0.0, 0.33], dtype=torch.float32, device=self.device)  # x, y, z
         self.pose_command[3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
         self.last_action = torch.zeros(6, dtype=torch.float32, device=self.device)
 
         # Create a timer to run the control loop at 60 Hz
+        print("Starting control loop...")
         self.timer = self.create_timer(1.0/60.0, self.control_loop)
 
     def control_loop(self):

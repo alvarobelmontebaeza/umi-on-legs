@@ -5,7 +5,7 @@ import os
 import sys
 import logging
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
@@ -52,4 +52,5 @@ if __name__ == "__main__":
         rclpy.spin(wx250s_node)
     finally:
         wx250s_node.wx250s.arm.go_to_sleep_pose()
+        robot_shutdown()
         rclpy.shutdown()
