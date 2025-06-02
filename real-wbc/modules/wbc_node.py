@@ -73,9 +73,7 @@ class WBCNode(Node):
         self,
         ckpt_path: str,
         pickle_path: str,
-        traj_idx: int,
         time_to_replay: float = 3.0,  # how long to wait after policy starts before starting trajectory
-        replay_speed: float = 1.0,
         fix_at_init_pose: bool = False,
         use_realtime_target: bool = False,
         policy_dt_slack: float = 0.003,
@@ -87,7 +85,6 @@ class WBCNode(Node):
         pose_estimator: str = "mocap",
     ):
         super().__init__("deploy_node")  # type: ignore
-        self.replay_speed = replay_speed
         self.time_to_replay = time_to_replay
         self.debug_log = False
         self.fix_at_init_pose = fix_at_init_pose
@@ -96,7 +93,7 @@ class WBCNode(Node):
         
         self.prev_action = self.init_action
 
-        # Adjust based on actual robot configuration
+        #TODO: Adjust based on actual robot configuration
         self.arm2base = affines.compose(
             T=np.array([0.085, 0.0, 0.094]),
             R=np.identity(3),
@@ -153,11 +150,18 @@ class WBCNode(Node):
 
         else:
             raise ValueError(f"Invalid pose_estimator: {pose_estimator}")
-        self.robot_pose = np.identity(4, dtype=np.float32)
+        
+        # Initialize robot pose
+        self.robot_pose_T = np.identity(4, dtype=np.float32)
+        self.prev_robot_pose_T = np.identity(4, dtype=np.float32)
+        self.robot_pose = np.zeros(7, dtype=np.float32)  # [x, y, z, qw, qx, qy, qz]
+        self.robot_pose[3] = 1.0  # w component of quaternion
         self.robot_pose_tick = -1
 
         # Pose estimator for arm
-        self.gripper_pose = np.identity(4, dtype=np.float32)
+        self.gripper_pose_T = np.identity(4, dtype=np.float32)
+        self.gripper_pose = np.zeros(7, dtype=np.float32)  # [x, y, z, qw, qx, qy, qz]
+        self.gripper_pose[3] = 1.0  # w component of quaternion
         self.gripper_pose_tick = -1
         self.gripper_pose_sub = self.create_subscription(
             PoseStamped,
@@ -188,7 +192,7 @@ class WBCNode(Node):
         self.obs_history_len: int
         self.device = device
         self.init_policy(
-            ckpt_path=ckpt_path, pickle_path=pickle_path, traj_idx=traj_idx
+            ckpt_path=ckpt_path, pickle_path=pickle_path
         )
         self.policy_dt_slack = policy_dt_slack
 
@@ -200,6 +204,7 @@ class WBCNode(Node):
         self.prev_obs_tick_s = -1.0
         self.prev_action_tick_s = -1.0
 
+        # Initialize observation and action buffers
         self.obs = torch.zeros((self.obs_dim,), device=device)
         self._obs_history_buf = torch.zeros(
             (1, self.obs_history_len, self.obs_dim),
@@ -207,7 +212,9 @@ class WBCNode(Node):
         self.obs_history_log: List[Dict[str, np.ndarray]] = []
         self.action_history_log: List[Dict[str, np.ndarray]] = []
         self.logging_dir = logging_dir
+        # Filters for angular and linear velocity
         self.angular_velocity_filter = MovingWindowFilter(window_size=10, data_dim=3)
+        self.linear_velocity_filter = MovingWindowFilter(window_size=10, data_dim=3)
 
         self.quadruped_dq = np.zeros(LEG_DOF)
         self.quadruped_q = np.zeros(LEG_DOF)
@@ -217,7 +224,7 @@ class WBCNode(Node):
         self.start_policy = False
         self.start_policy_time = time.monotonic()
         logging.info("Press L2 to start policy")
-        logging.info("Press L1 for emergent stop")
+        logging.info("Press L1 for emergency stop")
         self.key_is_pressed = False  # for key press event
 
         #  ------- ARM SETUP --------
@@ -244,15 +251,15 @@ class WBCNode(Node):
             name = 'arm',
             mode = 'position',
             profile_type = 'velocity',
-            profile_velocity = 131, # Max velocity of 3.14 rad/s
+            profile_velocity = 70, # Max velocity of 131==3.14 rad/s
         )
         
         # TODO: Set arm PD gains
         self.wx250s.core.robot_set_motor_pid_gains(
             cmd_type = 'group',
             name = 'arm',
-            kp_pos = 5.0,
-            kd_pos = 0.5,
+            kp_pos = 800,
+            kd_pos = 40,
         )
 
         # Send arm to home position
@@ -260,6 +267,9 @@ class WBCNode(Node):
         self.wx250s.gripper.release()
         self.wx250s_cmd = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.wx250s.arm.set_joint_positions(self.wx250s_cmd) # Should be same that home pose
+        # Set initial target pose
+        self.global_target_pose = np.identity(4, dtype=np.float32)
+        self.global_target_pose[:3, 3] = np.array([0.4, 0.0, 0.6], dtype=np.float32)
         
         self.start_time = -1.0
         self.init_pos_err_tolerance = init_pos_err_tolerance
@@ -308,7 +318,11 @@ class WBCNode(Node):
             - The pose is composed using the position and orientation from the incoming message.
             - The timestamp is calculated differently based on the pose estimator type.
         """
-        self.robot_pose = affines.compose(
+        # Update prev robot pose
+        self.prev_robot_pose_T = self.robot_pose_T.copy()
+
+        # Get update robot pose from the message
+        self.robot_pose_T = affines.compose(
             T=np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]),
             R=quaternions.quat2mat(
                 [
@@ -320,6 +334,8 @@ class WBCNode(Node):
             ),
             Z=np.ones(3),
         )
+        self.robot_pose[:3] = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        self.robot_pose[3:7] = np.array([msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z])
         t = Time.from_msg(msg.header.stamp)
         if self.pose_estimator == "iphone":
             self.robot_pose_tick = int(np.rint(t.nanoseconds / 1e6))
@@ -328,7 +344,7 @@ class WBCNode(Node):
 
     def gripper_pose_cb(self, msg):
         """Directly using mocap to estimate gripper pose"""
-        self.gripper_pose = affines.compose(
+        self.gripper_pose_T = affines.compose(
             T=np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]),
             R=quaternions.quat2mat(
                 [
@@ -340,6 +356,8 @@ class WBCNode(Node):
             ),
             Z=np.ones(3),
         )
+        self.gripper_pose[:3] = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        self.gripper_pose[3:7] = np.array([msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z])
         t = Time.from_msg(msg.header.stamp)
         self.gripper_pose_tick = int(self.prev_obs_tick_s * 1e3)
 
@@ -515,11 +533,12 @@ class WBCNode(Node):
         foot_force = np.array(
             [msg.foot_force[foot_id] for foot_id in range(4)], dtype=np.float64
         )
+        feet_contact = np.array(foot_force > 50.0, dtype=np.float64)  # Threshold for contact detection
 
         # ------ Get arm data ------       
-        arm_dof_pos = self.wx250s.arm.get_joint_positions().copy()
-        arm_dof_vel = self.wx250s.arm.get_joint_velocities().copy()
-        arm_dof_torque = self.wx250s.arm.get_joint_efforts().copy()
+        arm_dof_pos = self.wx250s.arm.get_joint_positions()
+        arm_dof_vel = self.wx250s.arm.get_joint_velocities()
+        arm_dof_torque = self.wx250s.arm.get_joint_efforts()
 
         # Concatenate joint data
         dof_pos = (
@@ -534,7 +553,7 @@ class WBCNode(Node):
         # Get arm EE pose in arm base frame
         arm_ee_transform = self.wx250s.arm.get_ee_pose()
         # Transform arm EE pose to the robot base frame
-        self.arm_ee_transform = self.robot_pose @ self.arm2base @ arm_ee_transform
+        self.arm_ee_transform = self.robot_pose_T @ self.arm2base @ arm_ee_transform
         
 
         eef_state.tick = msg.tick
@@ -550,9 +569,29 @@ class WBCNode(Node):
 
         elif self.pose_estimator == "mocap_gripper" and self.gripper_pose_tick == -1:
             return
+        
+        # Get base linear velocity
+        pos_diff = self.robot_pose_T[:3, 3] - self.prev_robot_pose_T[:3, 3]
+        dt = (msg.tick / 1000.0) - self.prev_obs_tick_s
+        base_lin_vel_w = pos_diff / dt if dt > 0 else np.zeros(3)
+        base_lin_vel = quat_rotate_inv(
+            self.robot_pose[3:7],
+            base_lin_vel_w
+        )
+        base_lin_vel = self.linear_velocity_filter.calculate_average(
+            np.array(base_lin_vel, dtype=np.float64)
+        )
+
 
         # Get the target pose in robot frame
-        local_target_pose = np.linalg.inv(self.robot_pose) @ global_target_pose
+        self.global_target_pose = affines.compose(
+            T=self.target_pos,
+            R=quaternions.quat2mat(self.target_rot),
+            Z=np.ones(3),
+        )
+        local_target_pose = np.linalg.inv(self.robot_pose_T) @ self.global_target_pose
+        target_pose_rot = quaternions.mat2quat(local_target_pose[:3, :3])
+        target_pose_pos = local_target_pose[:3, 3]
 
         # TODO: Revise criteria to validate targets
         if self.start_policy:
@@ -569,8 +608,18 @@ class WBCNode(Node):
         orn_obs = (local_target_pose[..., :2, :3]).reshape(-1)
         task_obs = np.concatenate((pos_obs, orn_obs), axis=0)
 
-
-        obs = np.concatenate(state_obs + [task_obs, self.prev_action], axis=0)
+        # Construct observation
+        obs = np.concatenate(
+            [projected_gravity,
+             base_lin_vel,
+             angular_velocity,
+             dof_pos,
+             dof_vel,
+             feet_contact,
+             self.prev_action,
+             target_pose_pos,
+             target_pose_rot], axis=0
+        )
 
         self.obs = torch.from_numpy(obs.copy()).squeeze().to(self.device, torch.float32)
 
@@ -597,8 +646,7 @@ class WBCNode(Node):
                 "curr_time_idx": self.curr_time_idx,
                 "gripper_pos_cmd": float(self.gripper_pos_cmd),
                 "target_indices": target_indices.copy(),
-                "global_target_pose": global_target_pose.copy(),
-                "observation_link_pose": observation_link_pose.copy(),
+                "global_target_pose": self.global_target_pose.copy(),
                 "local_target_pose": local_target_pose.copy(),
                 "pos_obs": pos_obs.copy(),
                 "orn_obs": orn_obs.copy(),
@@ -645,6 +693,7 @@ class WBCNode(Node):
         if self.debug_log:
             self.dump_logs()
 
+        logging.info("Emergency stop")
         exit(0)
 
     ##############################
@@ -689,7 +738,7 @@ class WBCNode(Node):
             )
             # Policy action inference
             with torch.inference_mode():
-                action = self.actor(self.obs_history_buf.view(1, -1))[0]
+                action = self.policy(self.obs_history_buf.view(1, -1))[0]
                 # print(action.cpu().numpy())
                 raw_action = action
                 self.prev_action = action.clone().cpu().numpy().copy()
@@ -740,10 +789,10 @@ class WBCNode(Node):
         )
 
         # Observation and action dims
-        self.obs_history_len = int(config["env"]["obs_history_len"])
+        self.obs_history_len = 1
         print(self.obs_history_len)
-        self.obs_dim = int(config["env"]["cfg"]["env"]["num_observations"])
-        self.action_dim = int(config["env"]["cfg"]["env"]["num_actions"])
+        self.obs_dim = 78
+        self.action_dim = 18
         placeholder_obs = torch.rand(
             self.obs_dim * self.obs_history_len,
             device=self.device,
@@ -787,13 +836,13 @@ class WBCNode(Node):
         self.policy_kp = np.zeros(18)
         self.policy_kd = np.zeros(18)
         # Leg gains
-        self.policy_kp[:12] = float(config["env"]["controller"]["kp"]["fill_value"])
-        self.policy_kd[:12] = float(config["env"]["controller"]["kd"]["fill_value"])
+        self.policy_kp[:12] = 40.0
+        self.policy_kd[:12] = 1.0
         # Arm gains
-        self.policy_kp[12:] = float(config["env"]["controller"]["arm_kp"]["fill_value"])
-        self.policy_kd[12:] = float(config["env"]["controller"]["arm_kd"]["fill_value"])
+        self.policy_kp[12:] = 800.0
+        self.policy_kd[12:] = 40.0
 
-        init_pose = reorder(self.obs_dof_pos_offset) # TODO: check if this is correct
+        init_pose = reorder(self.quadruped_q.copy()) # TODO: check if this is correct
         for i in range(LEG_DOF):
             self.motor_cmd[i].q = init_pose[i]
             self.motor_cmd[i].dq = 0.0
@@ -814,7 +863,9 @@ class WBCNode(Node):
 
         # Initialize target position and quaternion
         self.target_pos = np.zeros((3,), dtype=np.float32)
+        self.target_pos = self.get_obs_link_pose()[:3, 3].copy()
         self.target_rot = np.zeros((4,), dtype=np.float32)
+        self.target_rot = quaternions.mat2quat(self.get_obs_link_pose()[:3, :3])
 
         return config
 
@@ -823,9 +874,9 @@ class WBCNode(Node):
         return float(np.linalg.norm(self.get_obs_link_pose()[:3, 3] - curr_target_pos))
 
     def get_reaching_orn_err(self) -> float:
-        
+        curr_target_rot = quaternions.quat2mat(self.target_rot)
         tcp_rot_mat = self.get_obs_link_pose()[:3, :3]
-        rot_err_mat = curr_target_rot.T @ tcp_rot_mat
+        rot_err_mat = curr_target_rot @ tcp_rot_mat
         trace = np.trace(rot_err_mat)
         # to prevent numerical instability, clip the trace to [-1, 3]
         trace = np.clip(trace, a_min=-1 + 1e-8, a_max=3 - 1e-8)
@@ -850,13 +901,13 @@ class WBCNode(Node):
             T=wx250s_ee_pose[:3, 3], R=wx250s_ee_pose[:3, :3], Z=np.ones(3)
         )
         # Return the end effector pose in the task frame
-        return self.robot_pose @ self.arm2base @ ee2arm
+        return self.robot_pose_T @ self.arm2base @ ee2arm
 
     def get_obs_link_pose(self) -> np.ndarray:
         if self.pose_estimator in ["iphone", "mocap"]:
             return self.get_tcp_pose()
         elif self.pose_estimator == "mocap_gripper":
-            return self.gripper_pose
+            return self.gripper_pose_T
 
     def dump_logs(self):
         obs_history_log = self.obs_history_log
