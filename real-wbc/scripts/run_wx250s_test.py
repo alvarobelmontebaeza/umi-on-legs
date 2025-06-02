@@ -49,8 +49,10 @@ if __name__ == "__main__":
         logging.error("Arm is not connected!")
         exit(1)
     try:
+        logging.info("Starting wx250s node...")
         rclpy.spin(wx250s_node)
-    finally:
+    except KeyboardInterrupt:
+        logging.info("Keyboard interrupt detected. Shutting down...")
         wx250s_node.wx250s.arm.go_to_sleep_pose()
         robot_shutdown()
         rclpy.shutdown()
