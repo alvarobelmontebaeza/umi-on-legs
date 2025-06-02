@@ -52,7 +52,7 @@ class MocapNode(Node):
         self.prev_receive_time = time.monotonic()
 
         streaming_client = NatNetClient()
-        streaming_client.set_client_address("127.0.0.1")
+        streaming_client.set_client_address("0.0.0.0")
         streaming_client.set_server_address(ip)
         streaming_client.set_use_multicast(use_multicast)
 
@@ -107,7 +107,6 @@ class MocapNode(Node):
 
         rigid_body_list = data_dict["rigid_body_data"].rigid_body_list
         rigid_body_list = cast(List[MoCapData.RigidBody], rigid_body_list)
-
 
         for i, rigid_body in enumerate(rigid_body_list):
             if rigid_body.id_num not in rigid_body_dict:
