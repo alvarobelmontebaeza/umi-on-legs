@@ -50,7 +50,7 @@ class WX250sTestNode(Node):
             name="arm",
             mode="position",
             profile_type="velocity",
-            profile_velocity=70, # 131 == 3.14rad/s
+            profile_velocity=131, # 131 == 3.14rad/s
             profile_acceleration=15, # 15 == 5.6rad/s^2
         )
 
@@ -58,8 +58,8 @@ class WX250sTestNode(Node):
         self.wx250s.core.robot_set_motor_pid_gains(
             cmd_type="group",
             name="arm",
-            kp_pos= 600,
-            kd_pos= 30,
+            kp_pos= 800,
+            kd_pos= 40,
         )
 
         # Move the arm to the home position
@@ -144,6 +144,6 @@ class WX250sTestNode(Node):
         target_positions = action * self.action_scale
 
         # Command the arm to move to the target joint positions
-        #self.wx250s.arm.set_joint_positions(target_positions.numpy().tolist(), blocking=False)
+        self.wx250s.arm.set_joint_positions(target_positions.numpy().tolist(), blocking=False)
         # Update the last action
         self.last_action = action
