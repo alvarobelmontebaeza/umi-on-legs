@@ -375,29 +375,22 @@ class WBCNode(Node):
         return True
 
     def joy_stick_cb(self, msg):
-        logging.info(msg.keys)
+        # ----- PIPELINE CONTROL -----
         if msg.keys == 1:  # R1: start pipeline
             if not self.key_is_pressed:
                 logging.info("standing up")
                 self.start()
-            self.key_is_pressed = True
-            
-        if msg.keys == 1024: # X: Lay down
-            if not self.key_is_pressed:
-                logging.info("laying down")
-                q = np.concatenate([self.init_quadruped_q, self.init_arm_pos])
-                self.prev_action = q - self.action_offset
-                self.start_time= time.monotonic()
-            self.key_is_pressed = True
-            
+            self.key_is_pressed = True       
 
         if msg.keys == 16:  # R2: stop policy
             if not self.key_is_pressed:
                 logging.info("Stop policy")
                 self.start_policy = False
+
         if msg.keys == 2:  # L1: emergency stop
             logging.info("Emergency stop")
             self.emergency_stop()
+
         if msg.keys == 32:  # L2: start policy
             if self.ready_to_start_policy:
                 logging.info("Start policy")
@@ -407,7 +400,8 @@ class WBCNode(Node):
         # if msg.keys == int(2**15):  # Left # NOTE must map to another key, left already used in pose latency
         #     # pass
 
-        if msg.keys == int(2**12):  # Up: reset reaching trajectory pose
+        # ----- TARGET CONTROL -----
+        if msg.keys == int(2**12):  # Up: + 0.05m in X frame
             if not self.key_is_pressed:
                 if (
                     self.pose_estimator in ["mocap", "iphone"]
@@ -417,51 +411,18 @@ class WBCNode(Node):
                 ):
                     logging.info("Robot's pose is not initialized yet")
                 else:
+                    self.global_target_pose[:3, 3] += np.array([0.05, 0.0, 0.0])
                     logging.info(
-                        "Resetting reaching trajectory. "
-                        f"Old reaching errors: {self.get_reaching_pos_err(0):.03f}m, {self.get_reaching_pos_err_dir(0)*1e3}, "
-                        f"{self.get_reaching_orn_err(0):.01f}rad"
-                    )
-                    assert not self.target_relative_to_base
-
-                    tcp_pose = self.get_obs_link_pose()
-                    logging.info(f"tcp_pose: {tcp_pose}")
-                    
-                    if self.target_input_mode == "replay":
-                        # compute a transform that would the first target reaching pose
-                        # to the current tcp pose
-                        target_pose_seq = np.zeros((len(self.target_pos_seq), 4, 4))
-                        target_pose_seq[:, :3, :3] = self.target_rot_mat_seq
-                        target_pose_seq[:, :3, 3] = self.target_pos_seq
-                        target_pose_seq[:, 3, 3] = 1.0
-
-                        transform = tcp_pose @ np.linalg.inv(target_pose_seq[0])
-                        target_pose_seq = transform[None, :, :] @ target_pose_seq
-                        self.target_pos_seq = target_pose_seq[:, :3, 3]
-                        self.target_rot_mat_seq = target_pose_seq[:, :3, :3]
-                        
-                    elif self.target_input_mode == "realtime":
-                        quaternions_wxyz = quaternions.mat2quat(tcp_pose[:3, :3])
-                        logging.info(
-                            f"{tcp_pose[:3, 3]=}, {self.prev_obs_tick_s=}, {self.latest_tick=}"
-                        )
-                        self.realtime_target_traj.update(
-                            np.array([tcp_pose[:3, 3]]),
-                            np.array([quaternions_wxyz]),
-                            np.array([self.prev_obs_tick_s + 0.1]),
-                            self.prev_obs_tick_s,
-                            adaptive_latency_matching=False,  # TODO: add to config
-                            smoothen_time=0.1,  # TODO: add to config
-                        )
-                    logging.info(
-                        "Reaching trajectory resetted. "
+                        f"Target pose moved by 0.05m in X frame. "
+                        f"New target pose: {self.global_target_pose[:3, 3]}"
                         f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
                         f"{self.get_reaching_orn_err(0):.01f}rad,"
-                        f"tcp pose: {tcp_pose}"
+                        f"tcp pose: {self.get_obs_link_pose()}"
+
                     )
             self.key_is_pressed = True
 
-        if msg.keys == int(2**8):  # A: Start trajectory replay in the mocap frame
+        if msg.keys == int(2**14):  # Down: - 0.05m in X frame
             if not self.key_is_pressed:
                 if (
                     self.pose_estimator in ["mocap", "iphone"]
@@ -470,31 +431,100 @@ class WBCNode(Node):
                     and self.gripper_pose_tick == -1
                 ):
                     logging.info("Robot's pose is not initialized yet")
-                elif self.pose_estimator == "iphone":
-                    logging.info("iphone frame is not supported")
                 else:
-                    assert not self.target_relative_to_base
-
-                    tcp_pose = self.tossing_0620_init_pose2
-                    
-                    if self.target_input_mode == "replay":
-                        # compute a transform that would the first target reaching pose
-                        # to the current tcp pose
-                        target_pose_seq = np.zeros((len(self.target_pos_seq), 4, 4))
-                        target_pose_seq[:, :3, :3] = self.target_rot_mat_seq
-                        target_pose_seq[:, :3, 3] = self.target_pos_seq
-                        target_pose_seq[:, 3, 3] = 1.0
-
-                        transform = tcp_pose @ np.linalg.inv(target_pose_seq[0])
-                        target_pose_seq = transform[None, :, :] @ target_pose_seq
-                        self.target_pos_seq = target_pose_seq[:, :3, 3]
-                        self.target_rot_mat_seq = target_pose_seq[:, :3, :3]
-                    
+                    self.global_target_pose[:3, 3] -= np.array([0.05, 0.0, 0.0])
                     logging.info(
-                        "Reaching trajectory resetted. "
+                        f"Target pose moved by 0.05m in X frame. "
+                        f"New target pose: {self.global_target_pose[:3, 3]}"
                         f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
                         f"{self.get_reaching_orn_err(0):.01f}rad,"
-                        f"tcp pose: {tcp_pose}"
+                        f"tcp pose: {self.get_obs_link_pose()}"
+
+                    )
+            self.key_is_pressed = True
+
+        if msg.keys == int(2**13):  # Right: + 0.05m in Y frame
+            if not self.key_is_pressed:
+                if (
+                    self.pose_estimator in ["mocap", "iphone"]
+                    and self.robot_pose_tick == -1
+                    or self.pose_estimator == "mocap_gripper"
+                    and self.gripper_pose_tick == -1
+                ):
+                    logging.info("Robot's pose is not initialized yet")
+                else:
+                    self.global_target_pose[:3, 3] += np.array([0.0, 0.05, 0.0])
+                    logging.info(
+                        f"Target pose moved by 0.05m in Y frame. "
+                        f"New target pose: {self.global_target_pose[:3, 3]}"
+                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
+                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"tcp pose: {self.get_obs_link_pose()}"
+
+                    )
+            self.key_is_pressed = True
+        
+        if msg.keys == int(2**15):  # Left: - 0.05m in Y frame
+            if not self.key_is_pressed:
+                if (
+                    self.pose_estimator in ["mocap", "iphone"]
+                    and self.robot_pose_tick == -1
+                    or self.pose_estimator == "mocap_gripper"
+                    and self.gripper_pose_tick == -1
+                ):
+                    logging.info("Robot's pose is not initialized yet")
+                else:
+                    self.global_target_pose[:3, 3] -= np.array([0.0, 0.05, 0.0])
+                    logging.info(
+                        f"Target pose moved by 0.05m in Y frame. "
+                        f"New target pose: {self.global_target_pose[:3, 3]}"
+                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
+                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"tcp pose: {self.get_obs_link_pose()}"
+
+                    )
+            self.key_is_pressed = True
+
+        if msg.keys == int(2**8):  # A: +0.05 in Z frame
+            if not self.key_is_pressed:
+                if (
+                    self.pose_estimator in ["mocap", "iphone"]
+                    and self.robot_pose_tick == -1
+                    or self.pose_estimator == "mocap_gripper"
+                    and self.gripper_pose_tick == -1
+                ):
+                    logging.info("Robot's pose is not initialized yet")
+                else:
+                    self.global_target_pose[:3, 3] += np.array([0.0, 0.0, 0.05])
+                    logging.info(
+                        f"Target pose moved by 0.05m in Z frame. "
+                        f"New target pose: {self.global_target_pose[:3, 3]}"
+                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
+                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"tcp pose: {self.get_obs_link_pose()}"
+
+                    )
+
+            self.key_is_pressed = True
+
+        if msg.keys == int(2**10):  # X: -0.05 in Z frame
+            if not self.key_is_pressed:
+                if (
+                    self.pose_estimator in ["mocap", "iphone"]
+                    and self.robot_pose_tick == -1
+                    or self.pose_estimator == "mocap_gripper"
+                    and self.gripper_pose_tick == -1
+                ):
+                    logging.info("Robot's pose is not initialized yet")
+                else:
+                    self.global_target_pose[:3, 3] -= np.array([0.0, 0.0, 0.05])
+                    logging.info(
+                        f"Target pose moved by -0.05m in Z frame. "
+                        f"New target pose: {self.global_target_pose[:3, 3]}"
+                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
+                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"tcp pose: {self.get_obs_link_pose()}"
+
                     )
             self.key_is_pressed = True
 
@@ -506,10 +536,38 @@ class WBCNode(Node):
                 logging.info(f"Setting debug_log to {not self.debug_log}")
                 self.debug_log = not self.debug_log
             self.key_is_pressed = True
+        
+        if msg.keys == int(2**11):  # Y: reset target pose
+            if not self.key_is_pressed:
+                if (
+                    self.pose_estimator in ["mocap", "iphone"]
+                    and self.robot_pose_tick == -1
+                    or self.pose_estimator == "mocap_gripper"
+                    and self.gripper_pose_tick == -1
+                ):
+                    logging.info("Robot's pose is not initialized yet")
+                else:
+                    # Reset target pose to the 'home' position
+                    arm_home_pos = affines.compose(
+                        T=np.array([0.4, 0.0, 0.32]),
+                        R=np.identity(3),
+                        Z=np.ones(3),
+                    )
+                    self.global_target_pose = self.robot_pose_T.copy() @ arm_home_pos
+                    logging.info(
+                        f"Target pose reset to the 'home' position: {self.global_target_pose[:3, 3]}"
+                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
+                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"tcp pose: {self.get_obs_link_pose()}"
+                    )
+            self.key_is_pressed = True
 
+        # Button press release event
         if self.key_is_pressed:
             if msg.keys == 0:
                 self.key_is_pressed = False
+        
+
 
     # @profile
     def lowlevel_state_cb(self, msg: LowState):
@@ -737,16 +795,20 @@ class WBCNode(Node):
                 self.prev_action = action.clone().cpu().numpy().copy()
                 if self.policy_ctrl_iter % 10 == 0:
                     print(
-                        f"pos err: {self.get_reaching_pos_err_dir()*1e3} mm",
-                        f"orn err: {self.get_reaching_orn_err():.03f}rad",
+                        f"pos err: {self.get_reaching_pos_err()*1e3} mm",
+                        f"orn err: {self.get_reaching_orn_err():.03f} rad",
                     )
                 # Apply action scaling and offset
                 wbc_action = (
                     self.prev_action.copy() * self.action_scale + self.action_offset
                 )
+            
+            # Reorder leg actions to match the WBC order
             wbc_action[:12] = reorder(wbc_action[:12])
+            # Set action to motors and call motor timer callback
             self.set_motor_position(wbc_action)
             self.motor_timer_callback()
+            # Update timing variables
             self.prev_policy_time = time.monotonic()
             self.prev_motor_time = time.monotonic()
             self.prev_action_tick_s = self.prev_obs_tick_s
@@ -819,22 +881,22 @@ class WBCNode(Node):
         # self.obs_dof_vel_scale = float(config["env"]["state_obs"]["dof_vel"]["scale"])
 
         # ----- POLICY LOADING ------
-        # # load policy
-        # self.policy = torch.jit.load(ckpt_path, map_location=self.device)
-        # self.policy.eval()
+        # load policy
+        self.policy = torch.jit.load(ckpt_path, map_location=self.device)
+        self.policy.eval()
 
-        # # Test loaded policy and retrieve metrics
-        # policy_inference_times = []
-        # with torch.no_grad():
-        #     for _ in range(50):
-        #         start = time.time()
-        #         self.policy(
-        #             placeholder_obs[None, :]
-        #         )
-        #         policy_inference_times.append(float(time.time() - start))
-        # logging.info(
-        #     f"Policy inference time: {np.mean(policy_inference_times)} ({np.std(policy_inference_times)})"
-        # )
+        # Test loaded policy and retrieve metrics
+        policy_inference_times = []
+        with torch.no_grad():
+            for _ in range(50):
+                start = time.time()
+                self.policy(
+                    placeholder_obs[None, :]
+                )
+                policy_inference_times.append(float(time.time() - start))
+        logging.info(
+            f"Policy inference time: {np.mean(policy_inference_times)} ({np.std(policy_inference_times)})"
+        )
 
         # -------- CONTROL PARAMS --------
         # init p_gains, d_gains, torque_limits, default_dof_pos_all
@@ -844,16 +906,16 @@ class WBCNode(Node):
         self.policy_kp[:12] = 40.0
         self.policy_kd[:12] = 1.0
         # Arm gains
-        self.policy_kp[12:] = 800.0
-        self.policy_kd[12:] = 40.0
+        self.policy_kp[12:] = 1000.0
+        self.policy_kd[12:] = 80.0
 
         # init_pose = reorder(self.quadruped_q.copy()) # TODO: check if this is correct
         for i in range(LEG_DOF):
-            self.motor_cmd[i].q = 0.0
+            self.motor_cmd[i].q = self.action_offset[i]
             self.motor_cmd[i].dq = 0.0
             self.motor_cmd[i].tau = 0.0
-            self.motor_cmd[i].kp = 0.0  # self.env.p_gains[i]  # 30
-            self.motor_cmd[i].kd = 0.0  # float(self.env.d_gains[i])  # 0.6
+            self.motor_cmd[i].kp = self.policy_kp[i] # self.env.p_gains[i]  # 30
+            self.motor_cmd[i].kd = self.policy_kd[i]  # float(self.env.d_gains[i])  # 0.6
         self.go2_cmd_msg.motor_cmd = self.motor_cmd.copy()
 
         logging.info("starting to play policy")
