@@ -48,8 +48,6 @@ from omegaconf import OmegaConf
 from geometry_msgs.msg import PoseStamped
 from rclpy.time import Time
 
-from robot_state.msg import EEFState, EEFTraj
-
 
 def quat_rotate_inv(q: np.ndarray, v: np.ndarray):
     return quaternions.rotate_vector(
@@ -191,10 +189,7 @@ class WBCNode(Node):
         self.policy_freq: float
         self.obs_history_len: int
         self.device = device
-        self.init_policy(
-            ckpt_path=ckpt_path, pickle_path=pickle_path
-        )
-        self.policy_dt_slack = policy_dt_slack
+
 
         # Create a quick timer for steadier timer interval
         self.policy_timer = self.create_timer(1.0 / 1000.0, self.policy_timer_callback)
@@ -205,6 +200,8 @@ class WBCNode(Node):
         self.prev_action_tick_s = -1.0
 
         # Initialize observation and action buffers
+        self.obs_dim=78
+        self.obs_history_len = 1
         self.obs = torch.zeros((self.obs_dim,), device=device)
         self._obs_history_buf = torch.zeros(
             (1, self.obs_history_len, self.obs_dim),
@@ -267,6 +264,7 @@ class WBCNode(Node):
         self.wx250s.gripper.release()
         self.wx250s_cmd = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.wx250s.arm.set_joint_positions(self.wx250s_cmd) # Should be same that home pose
+        self.wx250s.arm.go_to_sleep_pose()
         # Set initial target pose
         self.global_target_pose = np.identity(4, dtype=np.float32)
         self.global_target_pose[:3, 3] = np.array([0.4, 0.0, 0.6], dtype=np.float32)
@@ -274,14 +272,15 @@ class WBCNode(Node):
         self.start_time = -1.0
         self.init_pos_err_tolerance = init_pos_err_tolerance
         self.init_orn_err_tolerance = init_orn_err_tolerance
-
-        # Broadcast the arm state
-        self.eef_state_pub = self.create_publisher(
-            EEFState, "WidowGo2/eef_state", 1
+        
+        # Init WBC policy
+        self.init_policy(
+            ckpt_path=ckpt_path, pickle_path=pickle_path
         )
+        self.policy_dt_slack = policy_dt_slack
 
     def start(self):
-        current_arm_state = self.wx250s.arm.get_joint_positions()
+        current_arm_state = np.array(self.wx250s.arm.get_joint_positions())
         self.init_arm_pos = current_arm_state.copy()
         self.start_time = time.monotonic()
 
@@ -376,11 +375,21 @@ class WBCNode(Node):
         return True
 
     def joy_stick_cb(self, msg):
+        logging.info(msg.keys)
         if msg.keys == 1:  # R1: start pipeline
             if not self.key_is_pressed:
                 logging.info("standing up")
                 self.start()
             self.key_is_pressed = True
+            
+        if msg.keys == 1024: # X: Lay down
+            if not self.key_is_pressed:
+                logging.info("laying down")
+                q = np.concatenate([self.init_quadruped_q, self.init_arm_pos])
+                self.prev_action = q - self.action_offset
+                self.start_time= time.monotonic()
+            self.key_is_pressed = True
+            
 
         if msg.keys == 16:  # R2: stop policy
             if not self.key_is_pressed:
@@ -439,7 +448,6 @@ class WBCNode(Node):
                         self.realtime_target_traj.update(
                             np.array([tcp_pose[:3, 3]]),
                             np.array([quaternions_wxyz]),
-                            np.array([self.gripper_pos_cmd]),
                             np.array([self.prev_obs_tick_s + 0.1]),
                             self.prev_obs_tick_s,
                             adaptive_latency_matching=False,  # TODO: add to config
@@ -522,6 +530,9 @@ class WBCNode(Node):
         self.quadruped_q = np.array(
             [motor_data.q for motor_data in msg.motor_state[:LEG_DOF]]
         )
+        if self.prev_obs_tick_s < 0.0:
+            self.init_quadruped_q = self.quadruped_q.copy() # Store initial leg dof pos
+        
         self.quadruped_dq = np.array(
             [motor_data.dq for motor_data in msg.motor_state[:LEG_DOF]]
         )
@@ -533,7 +544,7 @@ class WBCNode(Node):
         foot_force = np.array(
             [msg.foot_force[foot_id] for foot_id in range(4)], dtype=np.float64
         )
-        feet_contact = np.array(foot_force > 50.0, dtype=np.float64)  # Threshold for contact detection
+        feet_contact = np.array(foot_force > 25.0, dtype=np.float64)  # Threshold for contact detection
 
         # ------ Get arm data ------       
         arm_dof_pos = self.wx250s.arm.get_joint_positions()
@@ -546,23 +557,7 @@ class WBCNode(Node):
         )
         dof_vel = (
             np.concatenate((reorder(self.quadruped_dq), arm_dof_vel), axis=0)
-        )
-
-        #### EEF Observation ####
-        eef_state = EEFState()
-        # Get arm EE pose in arm base frame
-        arm_ee_transform = self.wx250s.arm.get_ee_pose()
-        # Transform arm EE pose to the robot base frame
-        self.arm_ee_transform = self.robot_pose_T @ self.arm2base @ arm_ee_transform
-        
-
-        eef_state.tick = msg.tick
-        eef_state.system_time = time.monotonic()
-        eef_state.eef_pose[0:3] = self.arm_ee_transform[:3, 3]
-        eef_state.eef_pose[3:7] = quaternions.mat2quat(self.arm_ee_transform[:3, :3])
-        eef_state.gripper_pos = self.wx250s.gripper.get_gripper_position()
-
-        self.eef_state_pub.publish(eef_state)
+        )        
 
         if self.pose_estimator in ["iphone", "mocap"] and self.robot_pose_tick == -1:
             return
@@ -644,7 +639,6 @@ class WBCNode(Node):
                 "dof_pos": dof_pos.copy(),
                 "dof_vel": dof_vel.copy(),
                 "curr_time_idx": self.curr_time_idx,
-                "gripper_pos_cmd": float(self.gripper_pos_cmd),
                 "target_indices": target_indices.copy(),
                 "global_target_pose": self.global_target_pose.copy(),
                 "local_target_pose": local_target_pose.copy(),
@@ -664,8 +658,8 @@ class WBCNode(Node):
     def motor_timer_callback(self):
         cb_start_time = time.monotonic()
         # send arm action
-        self.wx250s.arm.set_joint_positions(self.wx250s_cmd)
-        # Send legs action
+        self.wx250s.arm.set_joint_positions(self.wx250s_cmd, blocking=False)
+        # # Send legs action
         self.go2_cmd_msg.crc = get_crc(self.go2_cmd_msg)
         self.go2_motor_pub.publish(self.go2_cmd_msg)
 
@@ -723,9 +717,8 @@ class WBCNode(Node):
                 1 - time_ratio
             )
             wbc_action[:12] = reorder(wbc_action[:12])
-            gripper_pos = self.gripper_pos_cmd * time_ratio + (1 - time_ratio) * 0.0
             # send leg action
-            self.set_motor_position(wbc_action, gripper_pos)
+            self.set_motor_position(wbc_action)
             self.motor_timer_callback()
         elif ( # When the robot is standing up, the policy starts
             time.monotonic() - self.start_policy_time
@@ -752,7 +745,7 @@ class WBCNode(Node):
                     self.prev_action.copy() * self.action_scale + self.action_offset
                 )
             wbc_action[:12] = reorder(wbc_action[:12])
-            self.set_motor_position(wbc_action, self.gripper_pos_cmd)
+            self.set_motor_position(wbc_action)
             self.motor_timer_callback()
             self.prev_policy_time = time.monotonic()
             self.prev_motor_time = time.monotonic()
@@ -775,22 +768,19 @@ class WBCNode(Node):
     def init_policy(self, ckpt_path: str, pickle_path: str):
         logging.info("Preparing policy")
         faulthandler.enable()
-
+        '''
         # Load config file
         config = pickle.load(
             open(os.path.join(os.path.dirname(ckpt_path), "config.pkl"), "rb")
         )
+        '''
 
         # ------- CONFIG SETUP --------
         # Policy frequency
-        self.policy_freq = 1 / (
-            config["env"]["cfg"]["sim"]["dt"]
-            * np.mean(config["env"]["controller"]["decimation_count"])
-        )
+        self.policy_freq = 1 / 100
 
         # Observation and action dims
         self.obs_history_len = 1
-        print(self.obs_history_len)
         self.obs_dim = 78
         self.action_dim = 18
         placeholder_obs = torch.rand(
@@ -799,14 +789,29 @@ class WBCNode(Node):
         )
 
         # Action scales and offsets
+        leg_joint_offset = np.array([
+            -0.1, #FR
+            0.8,
+            -1.5,
+            0.1, #FL
+            0.8,
+            -1.5,
+            -0.1, #RR
+            1.0,
+            -1.5,
+            0.1, #RL
+            1.0,
+            -1.5
+        ])
+        arm_joint_offset = np.zeros(6)
         self.action_offset = (
-            torch.Tensor(config["env"]["controller"]["offset"]["data"]).cpu().numpy()
+            np.concatenate([leg_joint_offset, arm_joint_offset])
         )
-        self.action_scale = (
-            np.ones(18) * float(config["env"]["controller"]["scale"]["fill_value"])
-            if "fill_value" in config["env"]["controller"]["scale"]
-            else np.array(list(config["env"]["controller"]["scale"]["data"]))
+        self.action_scale = np.concatenate(
+            [np.ones(12) * 0.25, # Leg action scale
+             np.ones(6) * 0.5], # Arm action scale
         )
+            
         # self.obs_dof_pos_scale = float(config["env"]["state_obs"]["dof_pos"]["scale"])
         # self.obs_dof_pos_offset = np.array(
         #     config["env"]["state_obs"]["dof_pos"]["offset"]["data"]
@@ -814,22 +819,22 @@ class WBCNode(Node):
         # self.obs_dof_vel_scale = float(config["env"]["state_obs"]["dof_vel"]["scale"])
 
         # ----- POLICY LOADING ------
-        # load policy
-        self.policy = torch.jit.load(ckpt_path, map_location=self.device)
-        self.policy.eval()
+        # # load policy
+        # self.policy = torch.jit.load(ckpt_path, map_location=self.device)
+        # self.policy.eval()
 
-        # Test loaded policy and retrieve metrics
-        policy_inference_times = []
-        with torch.no_grad():
-            for _ in range(50):
-                start = time.time()
-                self.policy(
-                    placeholder_obs[None, :]
-                )
-                policy_inference_times.append(float(time.time() - start))
-        logging.info(
-            f"Policy inference time: {np.mean(policy_inference_times)} ({np.std(policy_inference_times)})"
-        )
+        # # Test loaded policy and retrieve metrics
+        # policy_inference_times = []
+        # with torch.no_grad():
+        #     for _ in range(50):
+        #         start = time.time()
+        #         self.policy(
+        #             placeholder_obs[None, :]
+        #         )
+        #         policy_inference_times.append(float(time.time() - start))
+        # logging.info(
+        #     f"Policy inference time: {np.mean(policy_inference_times)} ({np.std(policy_inference_times)})"
+        # )
 
         # -------- CONTROL PARAMS --------
         # init p_gains, d_gains, torque_limits, default_dof_pos_all
@@ -842,9 +847,9 @@ class WBCNode(Node):
         self.policy_kp[12:] = 800.0
         self.policy_kd[12:] = 40.0
 
-        init_pose = reorder(self.quadruped_q.copy()) # TODO: check if this is correct
+        # init_pose = reorder(self.quadruped_q.copy()) # TODO: check if this is correct
         for i in range(LEG_DOF):
-            self.motor_cmd[i].q = init_pose[i]
+            self.motor_cmd[i].q = 0.0
             self.motor_cmd[i].dq = 0.0
             self.motor_cmd[i].tau = 0.0
             self.motor_cmd[i].kp = 0.0  # self.env.p_gains[i]  # 30
@@ -853,10 +858,7 @@ class WBCNode(Node):
 
         logging.info("starting to play policy")
         logging.info(
-            f"kp: {self.policy_kp}, kd: {self.policy_kd}, torque_limits: {torque_limits},"
-            + f" obs_dof_pos_scale: {self.obs_dof_pos_scale}, "
-            + f"obs_dof_pos_offset: {self.obs_dof_pos_offset},"
-            + f" obs_dof_vel_scale: {self.obs_dof_vel_scale}, "
+            f"kp: {self.policy_kp}, kd: {self.policy_kd},"
             + f"action_offset: {self.action_offset},"
             + f"action_scale: {self.action_scale}"
         )
@@ -867,7 +869,7 @@ class WBCNode(Node):
         self.target_rot = np.zeros((4,), dtype=np.float32)
         self.target_rot = quaternions.mat2quat(self.get_obs_link_pose()[:3, :3])
 
-        return config
+        return
 
     def get_reaching_pos_err(self) -> float:
         curr_target_pos = self.target_pos
