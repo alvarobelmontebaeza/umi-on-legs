@@ -84,7 +84,7 @@ class WBCNode(Node):
     ):
         super().__init__("deploy_node")  # type: ignore
         self.time_to_replay = time_to_replay
-        self.debug_log = False
+        self.debug_log = True
         self.fix_at_init_pose = fix_at_init_pose
         self.init_action = np.zeros(18)
         self.latest_tick = -1
@@ -248,7 +248,7 @@ class WBCNode(Node):
             name = 'arm',
             mode = 'position',
             profile_type = 'velocity',
-            profile_velocity = 70, # Max velocity of 131==3.14 rad/s
+            profile_velocity = 131, # Max velocity of 131==3.14 rad/s
         )
         
         # TODO: Set arm PD gains
@@ -256,7 +256,7 @@ class WBCNode(Node):
             cmd_type = 'group',
             name = 'arm',
             kp_pos = 800,
-            kd_pos = 40,
+            kd_pos = 80,
         )
 
         # Send arm to home position
@@ -267,7 +267,7 @@ class WBCNode(Node):
         self.wx250s.arm.go_to_sleep_pose()
         # Set initial target pose
         self.global_target_pose = np.identity(4, dtype=np.float32)
-        self.global_target_pose[:3, 3] = np.array([0.4, 0.0, 0.6], dtype=np.float32)
+        self.global_target_pose[:3, 3] = np.array([0.4, 0.0, 0.7], dtype=np.float32)
         
         self.start_time = -1.0
         self.init_pos_err_tolerance = init_pos_err_tolerance
@@ -336,10 +336,16 @@ class WBCNode(Node):
         self.robot_pose[:3] = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
         self.robot_pose[3:7] = np.array([msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z])
         t = Time.from_msg(msg.header.stamp)
+        # Log first pose
+        if self.robot_pose_tick < 0:
+            logging.info(f"Initial Robot pose: {self.robot_pose}")
+            logging.info(f"Initial target pose: {self.get_obs_link_pose()}")
+
         if self.pose_estimator == "iphone":
             self.robot_pose_tick = int(np.rint(t.nanoseconds / 1e6))
         elif self.pose_estimator == "mocap":
             self.robot_pose_tick = int(self.prev_obs_tick_s * 1e3)
+        
 
     def gripper_pose_cb(self, msg):
         """Directly using mocap to estimate gripper pose"""
@@ -362,11 +368,12 @@ class WBCNode(Node):
 
     @property
     def ready_to_start_policy(self) -> bool:
-        if (self.get_reaching_pos_err(0) > self.init_pos_err_tolerance) or (
-            self.get_reaching_orn_err(0) > self.init_orn_err_tolerance
+        if (self.get_reaching_pos_err() > self.init_pos_err_tolerance) or (
+            self.get_reaching_orn_err() > self.init_orn_err_tolerance
         ):
-            pos_err = self.get_reaching_pos_err(0)
-            orn_err = self.get_reaching_orn_err(0)
+            pos_err = self.get_reaching_pos_err()
+            orn_err = self.get_reaching_orn_err(
+            )
             logging.info(
                 "Robot's pose is too far away from the target pose: "
                 + f"pos_err: {pos_err:.03f}m, orn_err: {orn_err:.03f}rad"
@@ -411,12 +418,12 @@ class WBCNode(Node):
                 ):
                     logging.info("Robot's pose is not initialized yet")
                 else:
-                    self.global_target_pose[:3, 3] += np.array([0.05, 0.0, 0.0])
+                    self.target_pos += np.array([0.05, 0.0, 0.0])
                     logging.info(
                         f"Target pose moved by 0.05m in X frame. "
-                        f"New target pose: {self.global_target_pose[:3, 3]}"
-                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
-                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"New target pose: {self.target_pos}"
+                        f"New reaching errors: {self.get_reaching_pos_err():.03f}m, "
+                        f"{self.get_reaching_orn_err():.01f}rad,"
                         f"tcp pose: {self.get_obs_link_pose()}"
 
                     )
@@ -432,12 +439,12 @@ class WBCNode(Node):
                 ):
                     logging.info("Robot's pose is not initialized yet")
                 else:
-                    self.global_target_pose[:3, 3] -= np.array([0.05, 0.0, 0.0])
+                    self.target_pos -= np.array([0.05, 0.0, 0.0])
                     logging.info(
                         f"Target pose moved by 0.05m in X frame. "
-                        f"New target pose: {self.global_target_pose[:3, 3]}"
-                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
-                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"New target pose: {self.target_pos}"
+                        f"New reaching errors: {self.get_reaching_pos_err():.03f}m, "
+                        f"{self.get_reaching_orn_err():.01f}rad,"
                         f"tcp pose: {self.get_obs_link_pose()}"
 
                     )
@@ -453,12 +460,12 @@ class WBCNode(Node):
                 ):
                     logging.info("Robot's pose is not initialized yet")
                 else:
-                    self.global_target_pose[:3, 3] += np.array([0.0, 0.05, 0.0])
+                    self.target_pos += np.array([0.0, 0.05, 0.0])
                     logging.info(
                         f"Target pose moved by 0.05m in Y frame. "
-                        f"New target pose: {self.global_target_pose[:3, 3]}"
-                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
-                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"New target pose: {self.target_pos}"
+                        f"New reaching errors: {self.get_reaching_pos_err():.03f}m, "
+                        f"{self.get_reaching_orn_err():.01f}rad,"
                         f"tcp pose: {self.get_obs_link_pose()}"
 
                     )
@@ -474,12 +481,12 @@ class WBCNode(Node):
                 ):
                     logging.info("Robot's pose is not initialized yet")
                 else:
-                    self.global_target_pose[:3, 3] -= np.array([0.0, 0.05, 0.0])
+                    self.target_pos -= np.array([0.0, 0.05, 0.0])
                     logging.info(
                         f"Target pose moved by 0.05m in Y frame. "
-                        f"New target pose: {self.global_target_pose[:3, 3]}"
-                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
-                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"New target pose: {self.target_pos}"
+                        f"New reaching errors: {self.get_reaching_pos_err():.03f}m, "
+                        f"{self.get_reaching_orn_err():.01f}rad,"
                         f"tcp pose: {self.get_obs_link_pose()}"
 
                     )
@@ -495,12 +502,12 @@ class WBCNode(Node):
                 ):
                     logging.info("Robot's pose is not initialized yet")
                 else:
-                    self.global_target_pose[:3, 3] += np.array([0.0, 0.0, 0.05])
+                    self.target_pos += np.array([0.0, 0.0, 0.05])
                     logging.info(
                         f"Target pose moved by 0.05m in Z frame. "
-                        f"New target pose: {self.global_target_pose[:3, 3]}"
-                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
-                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"New target pose: {self.target_pos}"
+                        f"New reaching errors: {self.get_reaching_pos_err():.03f}m, "
+                        f"{self.get_reaching_orn_err():.01f}rad,"
                         f"tcp pose: {self.get_obs_link_pose()}"
 
                     )
@@ -517,12 +524,12 @@ class WBCNode(Node):
                 ):
                     logging.info("Robot's pose is not initialized yet")
                 else:
-                    self.global_target_pose[:3, 3] -= np.array([0.0, 0.0, 0.05])
+                    self.target_pos -= np.array([0.0, 0.0, 0.05])
                     logging.info(
                         f"Target pose moved by -0.05m in Z frame. "
-                        f"New target pose: {self.global_target_pose[:3, 3]}"
-                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
-                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"New target pose: {self.target_pos}"
+                        f"New reaching errors: {self.get_reaching_pos_err():.03f}m, "
+                        f"{self.get_reaching_orn_err():.01f}rad,"
                         f"tcp pose: {self.get_obs_link_pose()}"
 
                     )
@@ -553,11 +560,11 @@ class WBCNode(Node):
                         R=np.identity(3),
                         Z=np.ones(3),
                     )
-                    self.global_target_pose = self.robot_pose_T.copy() @ arm_home_pos
+                    self.target_pos = self.robot_pose_T.copy() @ arm_home_pos
                     logging.info(
-                        f"Target pose reset to the 'home' position: {self.global_target_pose[:3, 3]}"
-                        f"New reaching errors: {self.get_reaching_pos_err(0):.03f}m, "
-                        f"{self.get_reaching_orn_err(0):.01f}rad,"
+                        f"Target pose reset to the 'home' position: {self.target_pos}"
+                        f"New reaching errors: {self.get_reaching_pos_err():.03f}m, "
+                        f"{self.get_reaching_orn_err():.01f}rad,"
                         f"tcp pose: {self.get_obs_link_pose()}"
                     )
             self.key_is_pressed = True
@@ -606,6 +613,8 @@ class WBCNode(Node):
 
         # ------ Get arm data ------       
         arm_dof_pos = self.wx250s.arm.get_joint_positions()
+        logging.info(f"gripper dof: {self.wx250s.gripper.get_gripper_position()}")
+        logging.info(f"finger dof: {self.wx250s.gripper.get_finger_position()}")
         arm_dof_vel = self.wx250s.arm.get_joint_velocities()
         arm_dof_torque = self.wx250s.arm.get_joint_efforts()
 
@@ -648,17 +657,13 @@ class WBCNode(Node):
 
         # TODO: Revise criteria to validate targets
         if self.start_policy:
-            if np.any(np.abs(local_target_pose[0, :3, 3]) > 0.5):
+            if np.any(np.abs(target_pose_pos > 1.0)):
+                logging.info(f"Target pose too far! Target: {target_pose_pos}. Emergency stop...")
                 self.emergency_stop()
-            if np.any(np.abs(local_target_pose[..., :3, 3]) > 0.1):
-                logging.warning(f"{local_target_pose[..., :3, 3]=} too far away")
-                local_target_pose[..., :3, 3] = np.clip(
-                    local_target_pose[..., :3, 3], -0.1, 0.1
-                )
 
         # TODO: Remove observation scaling
-        pos_obs = (local_target_pose[..., :3, 3]).reshape(-1)
-        orn_obs = (local_target_pose[..., :2, :3]).reshape(-1)
+        pos_obs = (target_pose_pos).reshape(-1)
+        orn_obs = (target_pose_rot).reshape(-1)
         task_obs = np.concatenate((pos_obs, orn_obs), axis=0)
 
         # Construct observation
@@ -675,14 +680,11 @@ class WBCNode(Node):
         )
 
         self.obs = torch.from_numpy(obs.copy()).squeeze().to(self.device, torch.float32)
-
+                
         self.prev_obs_time = time.monotonic()
         self.prev_obs_tick_s = msg.tick / 1000
 
         if self.debug_log:
-            if isinstance(target_indices, torch.Tensor):
-                target_indices = target_indices.detach().cpu().numpy()
-
             obs_dict = {
                 "quadruped_q": self.quadruped_q.copy(),
                 "quadruped_dq": self.quadruped_dq.copy(),
@@ -696,8 +698,6 @@ class WBCNode(Node):
                 "arm_dof_tau": arm_dof_torque.copy(),
                 "dof_pos": dof_pos.copy(),
                 "dof_vel": dof_vel.copy(),
-                "curr_time_idx": self.curr_time_idx,
-                "target_indices": target_indices.copy(),
                 "global_target_pose": self.global_target_pose.copy(),
                 "local_target_pose": local_target_pose.copy(),
                 "pos_obs": pos_obs.copy(),
@@ -708,7 +708,6 @@ class WBCNode(Node):
                 "time_monotonic": time.monotonic(),
             }
             self.obs_history_log.append(obs_dict)
-
     ##############################
     # motor commands
     ##############################
@@ -775,6 +774,12 @@ class WBCNode(Node):
                 1 - time_ratio
             )
             wbc_action[:12] = reorder(wbc_action[:12])
+            if time_ratio == 1.0:
+                target_pos_W = self.get_tcp_pose()
+                self.target_pos = target_pos_W[:3, 3]
+                self.target_rot = quaternions.mat2quat(target_pos_W[:3,:3])
+                logging.info(f"Global target pose: {target_pos_W}")
+                
             # send leg action
             self.set_motor_position(wbc_action)
             self.motor_timer_callback()
@@ -785,14 +790,14 @@ class WBCNode(Node):
             self.set_gains(kp=self.policy_kp[:12], kd=self.policy_kd[:12])
             new_obs = self.obs.detach().to(self.device).clone()
             self.obs_history_buf = torch.cat(
-                (self.obs_history_buf[:, 1:], new_obs[None, None, :]), dim=1
+                (self.obs_history_buf[:, 1:], new_obs[None, :]), dim=1
             )
             # Policy action inference
             with torch.inference_mode():
-                action = self.policy(self.obs_history_buf.view(1, -1))[0]
+                action = self.policy(new_obs)[0]
                 # print(action.cpu().numpy())
                 raw_action = action
-                self.prev_action = action.clone().cpu().numpy().copy()
+                #self.prev_action = action.clone().cpu().numpy().copy()
                 if self.policy_ctrl_iter % 10 == 0:
                     print(
                         f"pos err: {self.get_reaching_pos_err()*1e3} mm",
@@ -914,8 +919,8 @@ class WBCNode(Node):
             self.motor_cmd[i].q = self.action_offset[i]
             self.motor_cmd[i].dq = 0.0
             self.motor_cmd[i].tau = 0.0
-            self.motor_cmd[i].kp = self.policy_kp[i] # self.env.p_gains[i]  # 30
-            self.motor_cmd[i].kd = self.policy_kd[i]  # float(self.env.d_gains[i])  # 0.6
+            self.motor_cmd[i].kp = 0.0 #self.policy_kp[i] # self.env.p_gains[i]  # 30
+            self.motor_cmd[i].kd = 0.0 #self.policy_kd[i]  # float(self.env.d_gains[i])  # 0.6
         self.go2_cmd_msg.motor_cmd = self.motor_cmd.copy()
 
         logging.info("starting to play policy")
@@ -965,7 +970,7 @@ class WBCNode(Node):
             T=wx250s_ee_pose[:3, 3], R=wx250s_ee_pose[:3, :3], Z=np.ones(3)
         )
         # Return the end effector pose in the task frame
-        return self.robot_pose_T @ self.arm2base @ ee2arm
+        return self.robot_pose_T @ ee2arm
 
     def get_obs_link_pose(self) -> np.ndarray:
         if self.pose_estimator in ["iphone", "mocap"]:
