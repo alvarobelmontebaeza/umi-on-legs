@@ -50,16 +50,16 @@ interface_joint_order = [
 ]
 policy_joint_order = [
     MotorId.FL_HIP,
-    MotorId.FL_THIGH,
-    MotorId.FL_CALF,
     MotorId.FR_HIP,
-    MotorId.FR_THIGH,
-    MotorId.FR_CALF,
     MotorId.RL_HIP,
-    MotorId.RL_THIGH,
-    MotorId.RL_CALF,
     MotorId.RR_HIP,
+    MotorId.FL_THIGH,
+    MotorId.FR_THIGH,
+    MotorId.RL_THIGH,
     MotorId.RR_THIGH,
+    MotorId.FL_CALF,
+    MotorId.FR_CALF,
+    MotorId.RL_CALF,
     MotorId.RR_CALF,
 ]
 
@@ -95,9 +95,16 @@ def rematch_joint_order(
         return prev_val
 
 
-def reorder(prev_val):
+def interface_to_policy_reorder(prev_val):
     return rematch_joint_order(
         interface_joint_order,
         policy_joint_order,
+        prev_val,
+    )
+
+def policy_to_interface_reorder(prev_val):
+    return rematch_joint_order(
+        policy_joint_order,
+        interface_joint_order,
         prev_val,
     )
