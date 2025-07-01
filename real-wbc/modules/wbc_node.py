@@ -84,7 +84,7 @@ class WBCNode(Node):
     ):
         super().__init__("deploy_node")  # type: ignore
         self.time_to_replay = time_to_replay
-        self.debug_log = True
+        self.debug_log = False
         self.fix_at_init_pose = fix_at_init_pose
         self.init_action = np.zeros(18)
         self.latest_tick = -1
@@ -200,7 +200,7 @@ class WBCNode(Node):
         self.prev_action_tick_s = -1.0
 
         # Initialize observation and action buffers
-        self.obs_dim=78
+        self.obs_dim=74
         self.obs_history_len = 1
         self.obs = torch.zeros((self.obs_dim,), device=device)
         self._obs_history_buf = torch.zeros(
@@ -613,8 +613,6 @@ class WBCNode(Node):
 
         # ------ Get arm data ------       
         arm_dof_pos = self.wx250s.arm.get_joint_positions()
-        logging.info(f"gripper dof: {self.wx250s.gripper.get_gripper_position()}")
-        logging.info(f"finger dof: {self.wx250s.gripper.get_finger_position()}")
         arm_dof_vel = self.wx250s.arm.get_joint_velocities()
         arm_dof_torque = self.wx250s.arm.get_joint_efforts()
 
@@ -624,7 +622,9 @@ class WBCNode(Node):
         )
         dof_vel = (
             np.concatenate((reorder(self.quadruped_dq), arm_dof_vel), axis=0)
-        )        
+        )
+        
+        #logging.info(f"Dof Pos: {dof_pos}")        
 
         if self.pose_estimator in ["iphone", "mocap"] and self.robot_pose_tick == -1:
             return
@@ -643,6 +643,8 @@ class WBCNode(Node):
         base_lin_vel = self.linear_velocity_filter.calculate_average(
             np.array(base_lin_vel, dtype=np.float64)
         )
+        
+        #logging.info(f"Base lin vel: {base_lin_vel}")
 
 
         # Get the target pose in robot frame
@@ -656,10 +658,10 @@ class WBCNode(Node):
         target_pose_pos = local_target_pose[:3, 3]
 
         # TODO: Revise criteria to validate targets
-        if self.start_policy:
-            if np.any(np.abs(target_pose_pos > 1.0)):
-                logging.info(f"Target pose too far! Target: {target_pose_pos}. Emergency stop...")
-                self.emergency_stop()
+        # if self.start_policy:
+        #     if np.any(np.abs(target_pose_pos > 1.0)):
+        #         logging.info(f"Target pose too far! Target: {target_pose_pos}. Emergency stop...")
+        #         self.emergency_stop()
 
         # TODO: Remove observation scaling
         pos_obs = (target_pose_pos).reshape(-1)
@@ -758,7 +760,8 @@ class WBCNode(Node):
         stand_kd = np.ones(12) * 0.5
         stand_up_time = 5.0
         stand_up_buffer_time = 0.0
-
+        cb_start_time = time.monotonic()
+        logging.info(f"Start policy: {self.start_policy}")
         if self.start_time == -1.0:
             return
 
@@ -789,15 +792,12 @@ class WBCNode(Node):
         ):
             self.set_gains(kp=self.policy_kp[:12], kd=self.policy_kd[:12])
             new_obs = self.obs.detach().to(self.device).clone()
-            self.obs_history_buf = torch.cat(
-                (self.obs_history_buf[:, 1:], new_obs[None, :]), dim=1
-            )
+            # self.obs_history_buf = torch.cat((self.obs_history_buf[0, 1:], new_obs.unsqueeze(0)), dim=1)
             # Policy action inference
             with torch.inference_mode():
                 action = self.policy(new_obs)[0]
-                # print(action.cpu().numpy())
                 raw_action = action
-                #self.prev_action = action.clone().cpu().numpy().copy()
+                # self.prev_action = action.clone().cpu().numpy().copy()
                 if self.policy_ctrl_iter % 10 == 0:
                     print(
                         f"pos err: {self.get_reaching_pos_err()*1e3} mm",
@@ -807,8 +807,8 @@ class WBCNode(Node):
                 wbc_action = (
                     self.prev_action.copy() * self.action_scale + self.action_offset
                 )
-            
-            # Reorder leg actions to match the WBC order
+                logging.info(f"Policy processed action: {raw_action * self.action_scale + self.action_offset}")
+            # Reorder leg actions to match the interface order
             wbc_action[:12] = reorder(wbc_action[:12])
             # Set action to motors and call motor timer callback
             self.set_motor_position(wbc_action)
@@ -821,16 +821,13 @@ class WBCNode(Node):
 
             if self.debug_log:
                 action_dict = {
-                    "policy_input": self.obs_history_buf.view(1, -1)
-                    .detach()
-                    .cpu()
-                    .numpy(),
+                    "policy_input": new_obs,
                     "raw_action": raw_action.detach().cpu().numpy(),
                     "clipped_action": action.detach().cpu().numpy(),
                     "reordered_wbc_action": wbc_action,
                 }
                 self.action_history_log.append(action_dict)
-            # logging.info(f"Finish policy_timer_callback {time.monotonic() - cb_start_time:.04f}s")
+            logging.info(f"Finish policy_timer_callback {time.monotonic() - cb_start_time:.04f}s")
 
     def init_policy(self, ckpt_path: str, pickle_path: str):
         logging.info("Preparing policy")
@@ -844,11 +841,13 @@ class WBCNode(Node):
 
         # ------- CONFIG SETUP --------
         # Policy frequency
-        self.policy_freq = 1 / 100
+        self.policy_freq = 100.0
+        self.policy_ctrl_iter = 0
+
 
         # Observation and action dims
         self.obs_history_len = 1
-        self.obs_dim = 78
+        self.obs_dim = 74
         self.action_dim = 18
         placeholder_obs = torch.rand(
             self.obs_dim * self.obs_history_len,
@@ -857,18 +856,18 @@ class WBCNode(Node):
 
         # Action scales and offsets
         leg_joint_offset = np.array([
-            -0.1, #FR
-            0.8,
-            -1.5,
-            0.1, #FL
-            0.8,
-            -1.5,
-            -0.1, #RR
-            1.0,
-            -1.5,
-            0.1, #RL
-            1.0,
-            -1.5
+            0.1, # FL_HIP
+            -0.1, # FR_HIP
+            0.1, # RL_HIP
+            -0.1, # RR_HIP
+            0.8, # FL_THIGH
+            0.8, # FR_THIGH
+            1.0, # RL_THIGH
+            1.0, # RR_THIGH
+            -1.5, # FL_CALF
+            -1.5, # FR_CALF
+            -1.5, # RL_CALF
+            -1.5, # RR_CALF
         ])
         arm_joint_offset = np.zeros(6)
         self.action_offset = (
@@ -911,7 +910,7 @@ class WBCNode(Node):
         self.policy_kp[:12] = 40.0
         self.policy_kd[:12] = 1.0
         # Arm gains
-        self.policy_kp[12:] = 1000.0
+        self.policy_kp[12:] = 800.0
         self.policy_kd[12:] = 80.0
 
         # init_pose = reorder(self.quadruped_q.copy()) # TODO: check if this is correct
