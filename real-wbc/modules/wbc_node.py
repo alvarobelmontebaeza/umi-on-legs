@@ -19,7 +19,8 @@ from modules.common import (
     SDK_DOF,
     VEL_STOP_F,
     MotorId,
-    reorder,
+    policy_to_interface_reorder,
+    interface_to_policy_reorder
     torque_limits,
 )
 import scipy.signal as signal
@@ -152,8 +153,8 @@ class WBCNode(Node):
         # Initialize robot pose
         self.robot_pose_T = np.identity(4, dtype=np.float32)
         self.prev_robot_pose_T = np.identity(4, dtype=np.float32)
-        self.robot_pose = np.zeros(7, dtype=np.float32)  # [x, y, z, qw, qx, qy, qz]
-        self.robot_pose[3] = 1.0  # w component of quaternion
+        self.robot_pose_quat = np.zeros(7, dtype=np.float32)  # [x, y, z, qw, qx, qy, qz]
+        self.robot_pose_quat[3] = 1.0  # w component of quaternion
         self.robot_pose_tick = -1
 
         # Pose estimator for arm
@@ -190,10 +191,10 @@ class WBCNode(Node):
         self.obs_history_len: int
         self.device = device
 
-
         # Create a quick timer for steadier timer interval
         self.policy_timer = self.create_timer(1.0 / 1000.0, self.policy_timer_callback)
 
+        # Initialize time control variables
         self.prev_policy_time = time.monotonic()
         self.prev_obs_time = time.monotonic()
         self.prev_obs_tick_s = -1.0
@@ -209,10 +210,12 @@ class WBCNode(Node):
         self.obs_history_log: List[Dict[str, np.ndarray]] = []
         self.action_history_log: List[Dict[str, np.ndarray]] = []
         self.logging_dir = logging_dir
+
         # Filters for angular and linear velocity
         self.angular_velocity_filter = MovingWindowFilter(window_size=10, data_dim=3)
         self.linear_velocity_filter = MovingWindowFilter(window_size=10, data_dim=3)
 
+        # Initialize variables for quadruped joint state
         self.quadruped_dq = np.zeros(LEG_DOF)
         self.quadruped_q = np.zeros(LEG_DOF)
         self.quadruped_tau = np.zeros(LEG_DOF)
@@ -251,7 +254,7 @@ class WBCNode(Node):
             profile_velocity = 131, # Max velocity of 131==3.14 rad/s
         )
         
-        # TODO: Set arm PD gains
+        # Set arm PD gains
         self.wx250s.core.robot_set_motor_pid_gains(
             cmd_type = 'group',
             name = 'arm',
@@ -265,9 +268,10 @@ class WBCNode(Node):
         self.wx250s_cmd = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.wx250s.arm.set_joint_positions(self.wx250s_cmd) # Should be same that home pose
         self.wx250s.arm.go_to_sleep_pose()
+
         # Set initial target pose
-        self.global_target_pose = np.identity(4, dtype=np.float32)
-        self.global_target_pose[:3, 3] = np.array([0.4, 0.0, 0.7], dtype=np.float32)
+        self.target_pose_world_T = np.identity(4, dtype=np.float32)
+        self.target_pose_world_T[:3, 3] = np.array([0.4, 0.0, 0.7], dtype=np.float32)
         
         self.start_time = -1.0
         self.init_pos_err_tolerance = init_pos_err_tolerance
@@ -333,9 +337,10 @@ class WBCNode(Node):
             ),
             Z=np.ones(3),
         )
-        self.robot_pose[:3] = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
-        self.robot_pose[3:7] = np.array([msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z])
+        self.robot_pose_quat[:3] = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        self.robot_pose_quat[3:7] = np.array([msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z])
         t = Time.from_msg(msg.header.stamp)
+        
         # Log first pose
         if self.robot_pose_tick < 0:
             logging.info(f"Initial Robot pose: {self.robot_pose}")
@@ -607,10 +612,12 @@ class WBCNode(Node):
 
         # Get foot contact force data
         foot_force = np.array(
-            [msg.foot_force[foot_id] for foot_id in range(4)], dtype=np.float64
+            [msg.foot_force[foot_id] for foot_id in range(4)], dtype=np.float64 # FR, FL, RR, RL
         )
         feet_contact = np.array(foot_force > 25.0, dtype=np.float64)  # Threshold for contact detection
 
+        # Switch feet contact order to match the policy order
+        feet_contact = feet_contact[[1, 0, 3, 2]]  # FL, FR, RL, RR
         # ------ Get arm data ------       
         arm_dof_pos = self.wx250s.arm.get_joint_positions()
         arm_dof_vel = self.wx250s.arm.get_joint_velocities()
@@ -618,10 +625,10 @@ class WBCNode(Node):
 
         # Concatenate joint data
         dof_pos = (
-            np.concatenate((reorder(self.quadruped_q), arm_dof_pos), axis=0)
+            np.concatenate((interface_to_policy_reorder(self.quadruped_q), arm_dof_pos), axis=0)
         )
         dof_vel = (
-            np.concatenate((reorder(self.quadruped_dq), arm_dof_vel), axis=0)
+            np.concatenate((interface_to_policy_reorder(self.quadruped_dq), arm_dof_vel), axis=0)
         )
         
         #logging.info(f"Dof Pos: {dof_pos}")        
@@ -637,7 +644,7 @@ class WBCNode(Node):
         dt = (msg.tick / 1000.0) - self.prev_obs_tick_s
         base_lin_vel_w = pos_diff / dt if dt > 0 else np.zeros(3)
         base_lin_vel = quat_rotate_inv(
-            self.robot_pose[3:7],
+            self.robot_pose_quat[3:7],
             base_lin_vel_w
         )
         base_lin_vel = self.linear_velocity_filter.calculate_average(
@@ -648,12 +655,12 @@ class WBCNode(Node):
 
 
         # Get the target pose in robot frame
-        self.global_target_pose = affines.compose(
+        self.target_pose_world_T = affines.compose(
             T=self.target_pos,
             R=quaternions.quat2mat(self.target_rot),
             Z=np.ones(3),
         )
-        local_target_pose = np.linalg.inv(self.robot_pose_T) @ self.global_target_pose
+        local_target_pose = np.linalg.inv(self.robot_pose_T) @ self.target_pose_world_T
         target_pose_rot = quaternions.mat2quat(local_target_pose[:3, :3])
         target_pose_pos = local_target_pose[:3, 3]
 
@@ -700,7 +707,7 @@ class WBCNode(Node):
                 "arm_dof_tau": arm_dof_torque.copy(),
                 "dof_pos": dof_pos.copy(),
                 "dof_vel": dof_vel.copy(),
-                "global_target_pose": self.global_target_pose.copy(),
+                "target_pose_world_T": self.target_pose_world_T.copy(),
                 "local_target_pose": local_target_pose.copy(),
                 "pos_obs": pos_obs.copy(),
                 "orn_obs": orn_obs.copy(),
@@ -776,7 +783,7 @@ class WBCNode(Node):
             wbc_action[12:] = wbc_action[12:] * time_ratio + self.init_arm_pos * (
                 1 - time_ratio
             )
-            wbc_action[:12] = reorder(wbc_action[:12])
+            wbc_action[:12] = policy_to_interface_reorder(wbc_action[:12])
             if time_ratio == 1.0:
                 target_pos_W = self.get_tcp_pose()
                 self.target_pos = target_pos_W[:3, 3]
@@ -809,7 +816,7 @@ class WBCNode(Node):
                 )
                 logging.info(f"Policy processed action: {raw_action * self.action_scale + self.action_offset}")
             # Reorder leg actions to match the interface order
-            wbc_action[:12] = reorder(wbc_action[:12])
+            wbc_action[:12] = policy_to_interface_reorder(wbc_action[:12])
             # Set action to motors and call motor timer callback
             self.set_motor_position(wbc_action)
             self.motor_timer_callback()
