@@ -614,10 +614,9 @@ class WBCNode(Node):
         foot_force = np.array(
             [msg.foot_force[foot_id] for foot_id in range(4)], dtype=np.float64 # FR, FL, RR, RL
         )
+        foot_force = foot_force[[1, 0, 3, 2]]  # Reorder to match the policy order: FL, FR, RL, RR
         feet_contact = np.array(foot_force > 25.0, dtype=np.float64)  # Threshold for contact detection
 
-        # Switch feet contact order to match the policy order
-        feet_contact = feet_contact[[1, 0, 3, 2]]  # FL, FR, RL, RR
         # ------ Get arm data ------       
         arm_dof_pos = self.wx250s.arm.get_joint_positions()
         arm_dof_vel = self.wx250s.arm.get_joint_velocities()
@@ -848,7 +847,7 @@ class WBCNode(Node):
 
         # ------- CONFIG SETUP --------
         # Policy frequency
-        self.policy_freq = 100.0
+        self.policy_freq = 50.0
         self.policy_ctrl_iter = 0
 
 
