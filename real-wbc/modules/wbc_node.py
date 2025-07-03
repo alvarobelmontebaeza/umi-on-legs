@@ -919,9 +919,9 @@ class WBCNode(Node):
         self.policy_kp[12:] = 800.0
         self.policy_kd[12:] = 80.0
 
-        # init_pose = reorder(self.quadruped_q.copy()) # TODO: check if this is correct
+        init_pose = policy_to_interface_reorder(self.action_offset) # TODO: check if this is correct
         for i in range(LEG_DOF):
-            self.motor_cmd[i].q = self.action_offset[i]
+            self.motor_cmd[i].q = init_pose[i]
             self.motor_cmd[i].dq = 0.0
             self.motor_cmd[i].tau = 0.0
             self.motor_cmd[i].kp = 0.0 #self.policy_kp[i] # self.env.p_gains[i]  # 30
